@@ -46,8 +46,8 @@
 |------|------|------|
 | 3000 | API 服务 | Fastify HTTP |
 | 5173 | 前端仪表盘 | Vite Dev Server |
-| 5432 | PostgreSQL | 数据库 |
-| 6379 | Redis | 缓存与队列 |
+| 5434 | PostgreSQL | 数据库（避免与其他容器冲突） |
+| 6378 | Redis | 缓存与队列（避免与其他容器冲突） |
 | 8080 | Nginx | 反向代理（可选） |
 
 ## 安装步骤
@@ -111,14 +111,13 @@ cp .env.example .env
 ```env
 # 基础配置
 NODE_ENV=development
-PORT=3000
-CORS_ORIGIN=*
+API_PORT=3000
 
-# 数据库配置
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/secops?schema=public"
+# 数据库配置（对应 infra/docker-compose.yml 中 secpilot-postgres 的端口映射）
+DATABASE_URL="postgresql://secops:secops_secure_pass_2024@localhost:5434/secops_platform?schema=public"
 
-# Redis 配置
-REDIS_URL="redis://localhost:6379"
+# Redis 配置（对应 infra/docker-compose.yml 中 secpilot-redis 的端口映射）
+REDIS_URL="redis://:secops_redis_pass_2024@localhost:6378"
 
 # JWT 配置
 JWT_SECRET="your-super-secret-jwt-key-change-in-production"
@@ -151,9 +150,9 @@ docker compose -f infra/docker-compose.yml up -d
 docker compose -f infra/docker-compose.yml ps
 
 # 预期输出：
-# NAME                STATUS
-# secops-postgres     Up
-# secops-redis        Up
+# NAME                  STATUS
+# secpilot-postgres     Up (healthy)
+# secpilot-redis        Up (healthy)
 ```
 
 ### 步骤 6：初始化数据库
@@ -167,10 +166,7 @@ pnpm db:seed
 ```
 
 种子数据会创建：
-- 默认管理员账户
-- 示例项目
-- 示例扫描任务
-- 示例漏洞数据
+- 默认管理员账户（`admin@secops.local` / `admin123`）
 
 ## 本地运行
 
@@ -245,10 +241,10 @@ curl http://localhost:3000/api/health | jq .
 
 | 字段 | 值 |
 |------|-----|
-| 邮箱 | admin@example.com |
+| 邮箱 | admin@secops.local |
 | 密码 | admin123 |
 
-> **重要**：首次登录后请立即修改默认密码！
+> **重要**：首次登录后请立即修改默认密码并开启 MFA！
 
 ### 4. 验证 API
 
@@ -258,7 +254,7 @@ curl http://localhost:3000/api/health | jq .
 curl -X POST http://localhost:3000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{
-    "email": "admin@example.com",
+    "email": "admin@secops.local",
     "password": "admin123"
   }' | jq .
 ```
@@ -342,17 +338,17 @@ pnpm config set proxy http://your-proxy:port
    docker ps | grep postgres
    ```
 
-2. 检查端口是否正确：
+2. 检查端口是否正确（secpilot-postgres 映射到宿主机 5434）：
    ```bash
-   lsof -i :5432  # macOS
-   netstat -tlnp | grep 5432  # Linux
+   lsof -i :5434  # macOS
+   netstat -tlnp | grep 5434  # Linux
    ```
 
-3. 验证 `DATABASE_URL` 配置是否正确
+3. 验证 `DATABASE_URL` 配置是否正确（用户名 secops，端口 5434，库名 secops_platform）
 
 4. 手动连接测试：
    ```bash
-   docker exec -it secops-postgres psql -U postgres -d secops
+   docker exec -it secpilot-postgres psql -U secops -d secops_platform
    ```
 
 ### 3. Redis 连接失败
@@ -363,9 +359,9 @@ pnpm config set proxy http://your-proxy:port
 
 1. 检查 Redis 容器状态
 2. 验证 `REDIS_URL` 配置
-3. 手动测试连接：
+3. 手动测试连接（需带密码）：
    ```bash
-   docker exec -it secops-redis redis-cli ping
+   docker exec -it secpilot-redis redis-cli -a secops_redis_pass_2024 ping
    # 应返回 PONG
    ```
 

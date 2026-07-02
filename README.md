@@ -247,6 +247,8 @@ cp .env.example .env
 # 编辑 .env 文件，填入必要配置
 
 # 4. 启动基础设施 (PostgreSQL + Redis)
+# 注意：若本地已有其他 PostgreSQL 容器占用 5432，infra/docker-compose.yml
+# 已将 secpilot-postgres 映射到 5434，secpilot-redis 映射到 6378，与 apps/api/.env 一致
 pnpm infra:up
 
 # 5. 初始化数据库
@@ -311,7 +313,13 @@ docker compose up -d
 docker compose --profile scanners up -d
 ```
 
-**首次启动需要初始化管理员账号，打开 http://localhost:8080 注册即可。**
+**首次启动需要初始化管理员账号，执行以下命令后使用默认账号登录：**
+
+```bash
+pnpm db:seed
+```
+
+默认账号：`admin@secops.local` / `admin123`（生产环境请立即修改密码并开启 MFA）
 
 ## 项目结构
 
