@@ -89,6 +89,30 @@ export async function addDdSyncJob(data: DdSyncJobData): Promise<string> {
   return job.id as string;
 }
 
+export async function cancelScanJob(scanTaskId: string): Promise<boolean> {
+  const queue = getScanQueue();
+  const job = await queue.getJob(scanTaskId);
+  if (!job) return false;
+
+  const state = await job.getState();
+  if (state === 'completed' || state === 'failed') return false;
+
+  if (state === 'active') {
+    await job.updateProgress(-1);
+  } else {
+    await job.remove();
+  }
+
+  return true;
+}
+
+export async function isJobCancelled(scanTaskId: string): Promise<boolean> {
+  const queue = getScanQueue();
+  const job = await queue.getJob(scanTaskId);
+  if (!job) return true;
+  return job.progress === -1;
+}
+
 export async function getQueueStats() {
   const scanQueue = getScanQueue();
   const ddQueue = getDdSyncQueue();

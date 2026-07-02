@@ -1,10 +1,12 @@
 import { PrismaClient, UserRole } from '@prisma/client';
-import { createHash } from 'node:crypto';
+import { hash } from 'bcrypt';
 
 const prisma = new PrismaClient();
 
-function hashPassword(password: string): string {
-  return createHash('sha256').update(password).digest('hex');
+const BCRYPT_ROUNDS = 12;
+
+function hashPassword(password: string): Promise<string> {
+  return hash(password, BCRYPT_ROUNDS);
 }
 
 async function main() {
@@ -18,7 +20,7 @@ async function main() {
       name: 'Admin User',
       role: UserRole.ADMIN,
       mfaEnabled: false,
-      passwordHash: hashPassword('admin123'),
+      passwordHash: await hashPassword('admin123'),
     },
   });
   console.log(`✅ Admin user created: ${adminUser.email}`);

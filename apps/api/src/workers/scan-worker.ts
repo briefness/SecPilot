@@ -4,7 +4,70 @@ import { config } from '../config.js';
 import { computeDedupHash } from '../utils/dedup.js';
 import { ScanStatus, Severity, ScanType } from '@prisma/client';
 import { runScanner, ScannerFinding } from '../scanners/index.js';
-import { addDdSyncJob } from '../lib/queue.js';
+import { addDdSyncJob, isJobCancelled } from '../lib/queue.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, rm, access, constants } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const execFileAsync = promisify(execFile);
+
+const STATIC_SCANNERS = new Set<ScanType>([ScanType.STATIC_SAST, ScanType.STATIC_SCA]);
+
+const LOCKFILE_PATTERNS = [
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lockb',
+  'Pipfile.lock',
+  'poetry.lock',
+  'requirements.txt',
+  'Gemfile.lock',
+  'composer.lock',
+  'go.sum',
+  'Cargo.lock',
+  'mix.lock',
+  'pubspec.lock',
+];
+
+async function cloneRepo(gitRepo: string, branch?: string): Promise<string> {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'secscan-'));
+  const args = ['clone', '--depth', '1', '--single-branch'];
+  if (branch) {
+    args.push('--branch', branch);
+  }
+  args.push(gitRepo, tmpDir);
+
+  try {
+    await execFileAsync('git', args, { timeout: 120000 });
+  } catch (err: any) {
+    await rm(tmpDir, { recursive: true, force: true });
+    const stderr = err?.stderr || err?.message || '';
+    if (stderr.includes('Authentication failed') || stderr.includes('Permission denied') || stderr.includes('could not read Username')) {
+      throw new Error(`Git 仓库克隆失败：认证失败。若是私有仓库，请在仓库地址中携带 token（如 https://token@github.com/org/repo.git），或配置 git credential helper。`);
+    }
+    if (stderr.includes('not found')) {
+      throw new Error(`Git 仓库克隆失败：仓库不存在或无访问权限。`);
+    }
+    throw new Error(`Git 仓库克隆失败：${stderr || err.message}`);
+  }
+
+  return tmpDir;
+}
+
+async function findLockfile(repoDir: string): Promise<string | null> {
+  for (const pattern of LOCKFILE_PATTERNS) {
+    const filePath = join(repoDir, pattern);
+    try {
+      await access(filePath, constants.R_OK);
+      return filePath;
+    } catch {
+      // not found, try next
+    }
+  }
+  return null;
+}
 
 interface ScanJobData {
   scanTaskId: string;
@@ -23,8 +86,8 @@ function scannerFindingsToDbFindings(
   projectId: string
 ) {
   return findings.map((f) => {
-    const lineStart = f.lineStart ?? (f.filePath ? Math.floor(Math.random() * 500) + 10 : undefined);
-    const lineEnd = lineStart ? lineStart + Math.floor(Math.random() * 20) + 1 : undefined;
+    const lineStart = f.lineStart ?? undefined;
+    const lineEnd = f.lineEnd ?? undefined;
 
     const dedupInput = {
       cwe: f.cwe,
@@ -59,7 +122,9 @@ function scannerFindingsToDbFindings(
 async function processScanJob(job: Job<ScanJobData>) {
   const { scanTaskId, projectId, scanType, targetUrl, branch, commitHash, traceId } = job.data;
 
-  console.log(`[Scan Worker] Starting scan ${scanTaskId} (${scanType}) for project ${projectId}`);
+  console.log(`[Scan Worker] Starting scan ${scanTaskId} (${scanType}) attempt ${job.attemptsMade + 1} for project ${projectId}`);
+
+  let repoDir: string | null = null;
 
   try {
     await prisma.scanTask.update({
@@ -78,19 +143,52 @@ async function processScanJob(job: Job<ScanJobData>) {
       throw new Error(`Scanner ${scanType} is not enabled`);
     }
 
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { gitRepo: true, name: true },
+    });
+
+    const extraParams: Record<string, unknown> = {
+      projectId,
+      ...(scannerConfig.defaultParams as Record<string, unknown>),
+    };
+
+    if (STATIC_SCANNERS.has(scanType as ScanType) && project?.gitRepo) {
+      console.log(`[Scan Worker] Cloning repo for ${scanType}: ${project.gitRepo}`);
+      repoDir = await cloneRepo(project.gitRepo, branch);
+      extraParams.directory = repoDir;
+
+      if (scanType === ScanType.STATIC_SCA) {
+        const lockfilePath = await findLockfile(repoDir);
+        if (lockfilePath) {
+          console.log(`[Scan Worker] Found lockfile: ${lockfilePath}`);
+          extraParams.lockfilePath = lockfilePath;
+        }
+      }
+    }
+
     const result = await runScanner(scanType, {
       targetUrl,
       branch,
       commitHash,
       traceId,
-      extraParams: {
-        projectId,
-        ...(scannerConfig.defaultParams as Record<string, unknown>),
-      },
+      extraParams,
     });
 
     if (!result.success) {
       throw new Error(result.error || 'Scanner failed');
+    }
+
+    const cancelled = await isJobCancelled(scanTaskId);
+    if (cancelled) {
+      await prisma.scanTask.update({
+        where: { id: scanTaskId },
+        data: {
+          status: ScanStatus.CANCELLED,
+          completedAt: new Date(),
+        },
+      });
+      return { success: true, scanTaskId, cancelled: true };
     }
 
     const findingsData = scannerFindingsToDbFindings(result.findings, scanTaskId, projectId);
@@ -179,18 +277,27 @@ async function processScanJob(job: Job<ScanJobData>) {
       traceId,
     };
   } catch (error) {
-    console.error(`[Scan Worker] Scan ${scanTaskId} failed:`, error);
+    console.error(`[Scan Worker] Scan ${scanTaskId} failed (attempt ${job.attemptsMade + 1}):`, error);
 
-    await prisma.scanTask.update({
-      where: { id: scanTaskId },
-      data: {
-        status: ScanStatus.FAILED,
-        completedAt: new Date(),
-        errorMessage: error instanceof Error ? error.message : 'Unknown error',
-      },
-    });
+    const isFinalAttempt = job.attemptsMade >= 2;
+    if (isFinalAttempt) {
+      await prisma.scanTask.update({
+        where: { id: scanTaskId },
+        data: {
+          status: ScanStatus.FAILED,
+          completedAt: new Date(),
+          errorMessage: error instanceof Error ? error.message : 'Unknown error',
+        },
+      });
+    }
 
     throw error;
+  } finally {
+    if (repoDir) {
+      rm(repoDir, { recursive: true, force: true }).catch((err) => {
+        console.warn(`[Scan Worker] Failed to clean up repo dir ${repoDir}:`, err.message);
+      });
+    }
   }
 }
 

@@ -30,7 +30,8 @@ enum ProjectStatus {
 enum ScanType {
   STATIC_SAST
   STATIC_SCA
-  DYNAMIC_H5
+  DYNAMIC_DAST
+  DYNAMIC_PLAYWRIGHT
   MOBILE_MOBSF
   API_NUCLEI
 }
@@ -132,6 +133,21 @@ model ScannerConfig {
   updatedAt    DateTime @updatedAt
 }
 
+model ProjectScannerConfig {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scanType  ScanType
+  enabled   Boolean  @default(true)
+  params    Json?
+  schedule  String?  
+  lastScanAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, scanType])
+}
+
 model User {
   id          String   @id @default(cuid())
   email       String   @unique
@@ -165,6 +181,7 @@ model Project {
 
   scanTasks   ScanTask[]
   findings    Finding[]
+  scannerConfigs ProjectScannerConfig[]
   bypassRequests BypassRequest[]
   auditLogs   AuditLog[]
   appReleases AppRelease[]

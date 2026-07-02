@@ -126,6 +126,9 @@ export default function IntegrationPage() {
                       { method: 'POST', path: '/api/integrations/gateway/dye-verify', scope: 'GATEWAY', desc: '流量染色验签' },
                       { method: 'POST', path: '/api/integrations/gitlab/webhook', scope: 'WEBHOOK', desc: 'GitLab 事件回调' },
                       { method: 'POST', path: '/api/integrations/github/webhook', scope: 'WEBHOOK', desc: 'GitHub 事件回调' },
+                      { method: 'POST', path: '/api/projects/:id/scan', scope: 'CI_CD', desc: '一键触发项目已启用扫描器' },
+                      { method: 'GET', path: '/api/projects/:id/scanner-configs', scope: 'READ_ONLY', desc: '项目扫描配置查询' },
+                      { method: 'PUT', path: '/api/projects/:id/scanner-configs', scope: 'CI_CD', desc: '项目扫描配置更新' },
                       { method: 'POST', path: '/api/app-releases', scope: 'CI_CD', desc: '发版资产哈希上报' },
                       { method: 'GET', path: '/api/findings', scope: 'READ_ONLY', desc: '漏洞列表查询' },
                       { method: 'GET', path: '/api/scans/:id', scope: 'READ_ONLY', desc: '扫描任务状态' },
@@ -260,6 +263,60 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 X-SecOps-Simulation: True
 X-SecOps-Sign: <hmac_sha256>
 X-SecOps-Timestamp: 1704067200`}
+                />
+              </div>
+
+              <div>
+                <h3 className="font-medium mb-2">一键触发项目扫描</h3>
+                <p className="text-sm text-muted-foreground mb-2">
+                  通过 API 一键启动项目所有已启用的扫描器，支持指定扫描类型、目标 URL、分支等参数。
+                </p>
+                <CodeBlock
+                  language="bash"
+                  code={`# 触发项目所有已启用的扫描器
+curl -X POST ${apiBase}/api/projects/${sampleProject?.id || 'proj_xxx'}/scan \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer secp_your_api_token" \\
+  -d '{}'
+
+# 指定扫描类型和目标 URL
+curl -X POST ${apiBase}/api/projects/${sampleProject?.id || 'proj_xxx'}/scan \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer secp_your_api_token" \\
+  -d '{
+    "scanTypes": ["STATIC_SAST", "DYNAMIC_DAST"],
+    "targetUrl": "https://target.example.com",
+    "branch": "main",
+    "pipelineStage": "DAY_FAST_SCAN"
+  }'`}
+                />
+              </div>
+
+              <div>
+                <h3 className="font-medium mb-2">项目扫描配置管理</h3>
+                <p className="text-sm text-muted-foreground mb-2">
+                  每个项目可独立配置扫描器开关、参数和调度计划。
+                </p>
+                <CodeBlock
+                  language="bash"
+                  code={`# 获取项目扫描配置
+curl ${apiBase}/api/projects/${sampleProject?.id || 'proj_xxx'}/scanner-configs \\
+  -H "Authorization: Bearer secp_your_api_token"
+
+# 更新项目扫描配置
+curl -X PUT ${apiBase}/api/projects/${sampleProject?.id || 'proj_xxx'}/scanner-configs \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer secp_your_api_token" \\
+  -d '{
+    "configs": [
+      { "scanType": "STATIC_SAST", "enabled": true },
+      { "scanType": "STATIC_SCA", "enabled": true },
+      { "scanType": "DYNAMIC_DAST", "enabled": false },
+      { "scanType": "DYNAMIC_PLAYWRIGHT", "enabled": false },
+      { "scanType": "MOBILE_MOBSF", "enabled": false },
+      { "scanType": "API_NUCLEI", "enabled": true }
+    ]
+  }'`}
                 />
               </div>
             </CardContent>

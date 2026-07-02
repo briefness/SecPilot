@@ -49,7 +49,8 @@ const iconMap: Record<string, React.ElementType> = {
 const scannerCategoryMap: Record<ScannerType, string> = {
   STATIC_SAST: '静态分析',
   STATIC_SCA: '静态分析',
-  DYNAMIC_H5: '动态分析',
+  DYNAMIC_DAST: '动态分析',
+  DYNAMIC_PLAYWRIGHT: '动态分析',
   MOBILE_MOBSF: '移动安全',
   API_NUCLEI: '基础设施',
 }

@@ -1,9 +1,15 @@
 import { BaseScanner, ScannerResult, ScannerOptions, ScannerFinding } from './base.js';
 import { config } from '../config.js';
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { runDocker } from '../utils/docker.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+const DOCKER_IMAGE = 'projectdiscovery/nuclei:latest';
 
 interface NucleiResult {
   'template-id'?: string;
@@ -35,8 +41,18 @@ export class NucleiScanner extends BaseScanner {
     return config.NUCLEI_PATH || 'nuclei';
   }
 
+  private async localBinaryAvailable(): Promise<boolean> {
+    if (config.NUCLEI_PATH) return true;
+    try {
+      await execFileAsync('which', [this.binaryPath], { timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   get enabled(): boolean {
-    return !!this.binaryPath;
+    return true;
   }
 
   async scan(options: ScannerOptions): Promise<ScannerResult> {
@@ -52,39 +68,16 @@ export class NucleiScanner extends BaseScanner {
     }
 
     try {
-      const args = ['-u', target, '-jsonl'];
+      const localAvailable = await this.localBinaryAvailable();
+      let output: string;
 
-      if (options.traceId) {
-        args.push('-H', `X-B3-TraceId: ${options.traceId}`);
-        args.push('-H', 'X-SecOps-Simulation: True');
-      }
-
-      if (options.extraParams?.templates) {
-        args.push('-t', options.extraParams.templates as string);
-      }
-      if (options.extraParams?.severity) {
-        args.push('-severity', options.extraParams.severity as string);
-      }
-      if (options.extraParams?.rateLimit) {
-        args.push('-rate-limit', String(options.extraParams.rateLimit));
-      }
-      if (options.extraParams?.timeout) {
-        args.push('-timeout', String(options.extraParams.timeout));
+      if (localAvailable) {
+        output = await this.runLocal(target, options);
+      } else {
+        output = await this.runDocker(target, options);
       }
 
-      let stdout = '';
-      try {
-        const cmd = `${this.binaryPath} ${args.join(' ')}`;
-        const result = await execAsync(cmd, { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
-        stdout = result.stdout;
-      } catch (err: any) {
-        if (err.code !== 0 && err.code !== 1) {
-          throw err;
-        }
-        stdout = err.stdout || '';
-      }
-
-      const results = this.parseJsonLines(stdout);
+      const results = this.parseJsonLines(output);
       const findings = this.resultsToFindings(results);
       const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
 
@@ -101,6 +94,74 @@ export class NucleiScanner extends BaseScanner {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  }
+
+  private async runLocal(target: string, options: ScannerOptions): Promise<string> {
+    const args = ['-u', target, '-jsonl'];
+
+    if (options.traceId) {
+      args.push('-H', `X-B3-TraceId: ${options.traceId}`);
+      args.push('-H', 'X-SecOps-Simulation: True');
+    }
+
+    if (options.extraParams?.templates) {
+      args.push('-t', options.extraParams.templates as string);
+    }
+    if (options.extraParams?.severity) {
+      args.push('-severity', options.extraParams.severity as string);
+    }
+    if (options.extraParams?.rateLimit) {
+      args.push('-rate-limit', String(options.extraParams.rateLimit));
+    }
+    if (options.extraParams?.timeout) {
+      args.push('-timeout', String(options.extraParams.timeout));
+    }
+
+    try {
+      const result = await execFileAsync(this.binaryPath, args, { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
+      return result.stdout;
+    } catch (err: any) {
+      if (err.code !== 0 && err.code !== 1) {
+        throw err;
+      }
+      return err.stdout || '';
+    }
+  }
+
+  private async runDocker(target: string, options: ScannerOptions): Promise<string> {
+    const cmd: string[] = ['-u', target, '-jsonl'];
+
+    if (options.traceId) {
+      cmd.push('-H', `X-B3-TraceId: ${options.traceId}`);
+      cmd.push('-H', 'X-SecOps-Simulation: True');
+    }
+
+    if (options.extraParams?.templates) {
+      cmd.push('-t', options.extraParams.templates as string);
+    }
+    if (options.extraParams?.severity) {
+      cmd.push('-severity', options.extraParams.severity as string);
+    }
+    if (options.extraParams?.rateLimit) {
+      cmd.push('-rate-limit', String(options.extraParams.rateLimit));
+    }
+    if (options.extraParams?.timeout) {
+      cmd.push('-timeout', String(options.extraParams.timeout));
+    }
+
+    const result = await runDocker({
+      image: DOCKER_IMAGE,
+      cmd,
+      timeout: 600000,
+      autoRemove: true,
+      network: 'host',
+    });
+
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new Error(`Nuclei docker failed: ${result.stderr || result.stdout}`);
+    }
+
+    return result.stdout;
   }
 
   private parseJsonLines(output: string): NucleiResult[] {

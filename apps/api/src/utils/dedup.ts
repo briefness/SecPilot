@@ -22,12 +22,15 @@ export function computeDedupHash(input: DedupInput): string {
   const components = [
     normalized.cwe,
     normalized.filePath,
-    normalized.lineStart.toString(),
     normalized.location,
     normalized.params,
-  ].filter(Boolean);
+  ];
 
-  const key = components.join(':');
+  if (normalized.lineStart > 0) {
+    components.splice(2, 0, normalized.lineStart.toString());
+  }
+
+  const key = components.filter(Boolean).join(':');
   return createHash('md5').update(key).digest('hex');
 }
 

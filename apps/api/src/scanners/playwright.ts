@@ -26,7 +26,7 @@ interface PlaywrightScanOptions extends ScannerOptions {
 
 export class PlaywrightScanner extends BaseScanner {
   readonly name = 'Playwright';
-  readonly scanType = 'DYNAMIC_H5';
+  readonly scanType = 'DYNAMIC_PLAYWRIGHT';
 
   private get enabledFlag(): boolean {
     return config.PLAYWRIGHT_ENABLED === 'true';
@@ -251,5 +251,6 @@ export class PlaywrightScanner extends BaseScanner {
       }
     }
   }
+}
 
 export const playwrightScanner = new PlaywrightScanner();

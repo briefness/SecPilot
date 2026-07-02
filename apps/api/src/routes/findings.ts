@@ -2,7 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { computeDedupHash } from '../utils/dedup.js';
-import { Severity, FindingStatus } from '@prisma/client';
+import { Severity, FindingStatus, Prisma } from '@prisma/client';
 import { getDefectDojoClient, type DDFinding } from '../lib/defectdojo.js';
 
 const findingQuerySchema = z.object({
@@ -96,6 +96,17 @@ function mapOrdering(sortBy: string, sortOrder: string): string {
   return sortOrder === 'desc' ? `-${field}` : field;
 }
 
+function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
+  const latestMap = new Map<string, T>();
+  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const f of sorted) {
+    if (!latestMap.has(f.dedupHash)) {
+      latestMap.set(f.dedupHash, f);
+    }
+  }
+  return Array.from(latestMap.values());
+}
+
 const findingsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/api/findings', async (request) => {
     const query = findingQuerySchema.parse(request.query);
@@ -154,9 +165,7 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const skip = (query.page - 1) * query.pageSize;
-
-    const where: Record<string, unknown> = {};
+    const where: Prisma.FindingWhereInput = {};
     if (query.projectId) where.projectId = query.projectId;
     if (query.scanId) where.scanId = query.scanId;
     if (query.severity) where.severity = query.severity;
@@ -180,39 +189,44 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       ];
     }
 
-    const orderBy: Record<string, string> = {};
-    if (query.sortBy === 'severity') {
-      orderBy.severity = query.sortOrder;
-    } else if (query.sortBy === 'createdAt') {
-      orderBy.createdAt = query.sortOrder;
-    } else if (query.sortBy === 'filePath') {
-      orderBy.filePath = query.sortOrder;
-    } else if (query.sortBy === 'slaDeadline') {
-      orderBy.slaDeadline = query.sortOrder;
-    } else if (query.sortBy === 'status') {
-      orderBy.status = query.sortOrder;
-    }
+    const allFindings = await prisma.finding.findMany({
+      where,
+      include: {
+        project: { select: { id: true, name: true, productId: true } },
+        scan: { select: { id: true, type: true, status: true, triggeredAt: true } },
+        assignee: { select: { id: true, name: true, email: true } },
+      },
+    });
 
-    const [findings, total] = await Promise.all([
-      prisma.finding.findMany({
-        where,
-        skip,
-        take: query.pageSize,
-        orderBy,
-        include: {
-          project: {
-            select: { id: true, name: true, productId: true },
-          },
-          scan: {
-            select: { id: true, type: true, status: true, triggeredAt: true },
-          },
-          assignee: {
-            select: { id: true, name: true, email: true },
-          },
-        },
-      }),
-      prisma.finding.count({ where }),
-    ]);
+    const deduped = dedupeFindingsLatest(allFindings);
+
+    const severityOrder: Record<string, number> = {
+      [Severity.CRITICAL]: 0,
+      [Severity.HIGH]: 1,
+      [Severity.MEDIUM]: 2,
+      [Severity.LOW]: 3,
+      [Severity.INFO]: 4,
+    };
+
+    deduped.sort((a, b) => {
+      let cmp = 0;
+      if (query.sortBy === 'severity') {
+        cmp = severityOrder[a.severity] - severityOrder[b.severity];
+      } else if (query.sortBy === 'createdAt') {
+        cmp = a.createdAt.getTime() - b.createdAt.getTime();
+      } else if (query.sortBy === 'filePath') {
+        cmp = (a.filePath || '').localeCompare(b.filePath || '');
+      } else if (query.sortBy === 'slaDeadline') {
+        cmp = (a.slaDeadline?.getTime() || 0) - (b.slaDeadline?.getTime() || 0);
+      } else if (query.sortBy === 'status') {
+        cmp = a.status.localeCompare(b.status);
+      }
+      return query.sortOrder === 'desc' ? -cmp : cmp;
+    });
+
+    const total = deduped.length;
+    const skip = (query.page - 1) * query.pageSize;
+    const findings = deduped.slice(skip, skip + query.pageSize);
 
     return {
       data: findings,
@@ -428,31 +442,15 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       };
     }
 
-    const where: Record<string, unknown> = { falsePositive: false };
+    const where: Prisma.FindingWhereInput = { falsePositive: false };
     if (query.projectId) where.projectId = query.projectId;
 
-    const [bySeverity, total, byCwe, byFilePath] = await Promise.all([
-      prisma.finding.groupBy({
-        by: ['severity'],
-        where,
-        _count: { severity: true },
-      }),
-      prisma.finding.count({ where }),
-      prisma.finding.groupBy({
-        by: ['cwe'],
-        where: { ...where, cwe: { not: null } },
-        _count: { cwe: true },
-        orderBy: { _count: { cwe: 'desc' } },
-        take: 10,
-      }),
-      prisma.finding.groupBy({
-        by: ['filePath'],
-        where: { ...where, filePath: { not: null } },
-        _count: { filePath: true },
-        orderBy: { _count: { filePath: 'desc' } },
-        take: 10,
-      }),
-    ]);
+    const allFindings = await prisma.finding.findMany({
+      where,
+      select: { id: true, dedupHash: true, createdAt: true, severity: true, cwe: true, filePath: true },
+    });
+
+    const deduped = dedupeFindingsLatest(allFindings);
 
     const severityDistribution: Record<string, number> = {
       [Severity.CRITICAL]: 0,
@@ -462,15 +460,30 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       [Severity.INFO]: 0,
     };
 
-    for (const item of bySeverity) {
-      severityDistribution[item.severity] = item._count.severity;
+    const cweCounts = new Map<string | null, number>();
+    const fileCounts = new Map<string | null, number>();
+
+    for (const f of deduped) {
+      severityDistribution[f.severity]++;
+      if (f.cwe) cweCounts.set(f.cwe, (cweCounts.get(f.cwe) || 0) + 1);
+      if (f.filePath) fileCounts.set(f.filePath, (fileCounts.get(f.filePath) || 0) + 1);
     }
 
+    const topCwes = Array.from(cweCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([cwe, count]) => ({ cwe, count }));
+
+    const topFiles = Array.from(fileCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([filePath, count]) => ({ filePath, count }));
+
     return {
-      total,
+      total: deduped.length,
       severityDistribution,
-      topCwes: byCwe.map((item) => ({ cwe: item.cwe, count: item._count.cwe })),
-      topFiles: byFilePath.map((item) => ({ filePath: item.filePath, count: item._count.filePath })),
+      topCwes,
+      topFiles,
     };
   });
   fastify.patch('/api/findings/:id/status', async (request, reply) => {
@@ -581,21 +594,22 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       projectId: z.string().optional(),
     }).parse(request.query);
 
-    const where: Record<string, unknown> = { falsePositive: false };
+    const where: Prisma.FindingWhereInput = { falsePositive: false };
     if (query.projectId) where.projectId = query.projectId;
 
-    const byStatus = await prisma.finding.groupBy({
-      by: ['status'],
+    const allFindings = await prisma.finding.findMany({
       where,
-      _count: { status: true },
+      select: { id: true, dedupHash: true, createdAt: true, status: true },
     });
+
+    const deduped = dedupeFindingsLatest(allFindings);
 
     const result: Record<string, number> = {};
     for (const s of Object.values(FindingStatus)) {
       result[s] = 0;
     }
-    for (const item of byStatus) {
-      result[item.status] = item._count.status;
+    for (const f of deduped) {
+      result[f.status]++;
     }
 
     return result;
@@ -606,28 +620,32 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       projectId: z.string().optional(),
     }).parse(request.query);
 
-    const where: Record<string, unknown> = {
+    const where: Prisma.FindingWhereInput = {
       falsePositive: false,
       status: { notIn: [FindingStatus.RESOLVED, FindingStatus.FALSE_POSITIVE, FindingStatus.ACCEPTED_RISK] },
     };
     if (query.projectId) where.projectId = query.projectId;
 
-    const [total, breached, atRisk] = await Promise.all([
-      prisma.finding.count({ where: { ...where, slaDeadline: { not: null } } }),
-      prisma.finding.count({
-        where: { ...where, slaDeadline: { not: null, lt: new Date() } },
-      }),
-      prisma.finding.count({
-        where: {
-          ...where,
-          slaDeadline: {
-            not: null,
-            gte: new Date(),
-            lt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-          },
-        },
-      }),
-    ]);
+    const allFindings = await prisma.finding.findMany({
+      where,
+      select: { id: true, dedupHash: true, createdAt: true, slaDeadline: true },
+    });
+
+    const deduped = dedupeFindingsLatest(allFindings);
+
+    const now = new Date();
+    const threeDaysLater = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+
+    let total = 0;
+    let breached = 0;
+    let atRisk = 0;
+
+    for (const f of deduped) {
+      if (!f.slaDeadline) continue;
+      total++;
+      if (f.slaDeadline < now) breached++;
+      else if (f.slaDeadline < threeDaysLater) atRisk++;
+    }
 
     return { total, breached, atRisk };
   });

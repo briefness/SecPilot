@@ -10,7 +10,8 @@ import type { BaseScanner, ScannerResult, ScannerOptions } from './base.js';
 const scannerRegistry: Record<string, BaseScanner> = {
   [ScanType.STATIC_SAST]: sonarQubeScanner,
   [ScanType.STATIC_SCA]: osvScanner,
-  [ScanType.DYNAMIC_H5]: playwrightScanner,
+  [ScanType.DYNAMIC_DAST]: zapScanner,
+  [ScanType.DYNAMIC_PLAYWRIGHT]: playwrightScanner,
   [ScanType.MOBILE_MOBSF]: mobsfScanner,
   [ScanType.API_NUCLEI]: nucleiScanner,
 };

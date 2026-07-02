@@ -24,6 +24,7 @@ import gitlabIntegrationRoutes from './routes/gitlab-integrations.js';
 import githubIntegrationRoutes from './routes/github-integrations.js';
 import apiKeyRoutes from './routes/api-keys.js';
 import integrationRoutes from './routes/integrations.js';
+import projectScannerRoutes from './routes/project-scanners.js';
 import { TrafficDye } from '@secops/traffic-dye';
 
 async function buildServer() {
@@ -97,6 +98,7 @@ async function buildServer() {
   await fastify.register(githubIntegrationRoutes);
   await fastify.register(apiKeyRoutes);
   await fastify.register(integrationRoutes);
+  await fastify.register(projectScannerRoutes);
 
   fastify.get('/api/queue/stats', async () => {
     const stats = await getQueueStats();

@@ -172,7 +172,8 @@ const stageLabelMap: Record<PipelineStage, string> = {
 const scanTypeLabelMap: Record<ScanType, string> = {
   STATIC_SAST: 'SAST 静态分析',
   STATIC_SCA: 'SCA 依赖扫描',
-  DYNAMIC_H5: 'DAST 动态扫描',
+  DYNAMIC_DAST: 'DAST 动态扫描',
+  DYNAMIC_PLAYWRIGHT: 'Playwright 爬虫',
   MOBILE_MOBSF: '移动安全扫描',
   API_NUCLEI: 'API 安全扫描',
 }

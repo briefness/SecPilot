@@ -591,9 +591,7 @@ function AccountSecurity() {
     setSetupError('')
     setSettingUp(true)
     try {
-      const res = await api.post('/auth/mfa/enable', { code: setupCode }, {
-        headers: { Authorization: `Bearer ${setupData.setupToken}` }
-      }) as any
+      const res = await api.post('/auth/mfa/enable', { code: setupCode, setupToken: setupData.setupToken }) as any
       if (res.success) {
         setMfaEnabled(true)
         setSetupData(null)

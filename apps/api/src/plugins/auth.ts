@@ -4,9 +4,12 @@ import { prisma } from '../lib/prisma.js';
 
 export interface JwtPayload {
   userId: string;
-  email: string;
-  role: string;
-  name: string;
+  email?: string;
+  role?: string;
+  name?: string;
+  mfaPending?: boolean;
+  mfaSetup?: boolean;
+  mfaSecret?: string;
 }
 
 declare module '@fastify/jwt' {
@@ -45,9 +48,17 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const token = await request.jwtVerify<JwtPayload>();
+      const cookieHeader = request.headers.cookie || '';
+      const tokenMatch = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/);
+      const token = tokenMatch ? tokenMatch[1] : null;
+
+      if (!token) {
+        return reply.status(401).send({ error: 'Unauthorized' });
+      }
+
+      const decoded = fastify.jwt.verify<JwtPayload>(token);
       const user = await prisma.user.findUnique({
-        where: { id: token.userId },
+        where: { id: decoded.userId },
         select: { id: true, email: true, role: true, name: true, mfaEnabled: true },
       });
 

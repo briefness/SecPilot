@@ -407,7 +407,8 @@ class DefectDojoClient {
     const testTypeMap: Record<string, string> = {
       STATIC_SAST: 'SonarQube Scan',
       STATIC_SCA: 'Dependency Check Scan',
-      DYNAMIC_H5: 'ZAP Scan',
+      DYNAMIC_DAST: 'ZAP Scan',
+      DYNAMIC_PLAYWRIGHT: 'Playwright Scan',
       MOBILE_MOBSF: 'MobSF Scan',
       API_NUCLEI: 'Nuclei Scan',
     };

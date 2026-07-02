@@ -43,7 +43,7 @@ interface ZapSpiderStatusResponse {
 
 export class ZapScanner extends BaseScanner {
   readonly name = 'OWASP ZAP';
-  readonly scanType = 'DYNAMIC_H5';
+  readonly scanType = 'DYNAMIC_DAST';
 
   private get baseUrl(): string {
     return config.ZAP_API_URL || 'http://localhost:8080';

@@ -28,7 +28,7 @@
 
 ## 项目概述
 
-SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDojo 中台** 构建，整合 SAST / SCA / DAST / 移动安全 / API 安全全链路扫描能力。平台采用**控制面与数据面分离**的微服务架构，通过**流量染色 + 影子区隔离**实现生产环境零侵入的安全测试，支持 **GitHub Required Workflows** 和 **GitLab Compliance Pipelines** 两种强制合规模式，项目无法绕过。全部数据来自真实扫描器，零 Mock。
+SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDojo 中台** 构建，整合 SAST / SCA / DAST / 移动安全 / API 安全全链路扫描能力。平台采用**控制面与数据面分离**的微服务架构，通过**流量染色 + 影子区隔离**实现生产环境零侵入的安全测试，支持 **GitHub Required Workflows** 和 **GitLab Compliance Pipelines** 两种强制合规模式，项目无法绕过。
 
 ### 解决的核心痛点
 
@@ -48,16 +48,16 @@ SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDo
 - **去重引擎**：基于 CWE + 路径 + 参数散列的多维去重，大幅降低误报运营成本
 - **Slack / PagerDuty 通知**：关键事件实时告警，紧急 Bypass 顶格推送
 
-### 🛡️ 六类扫描器真实接入（零 Mock）
+### 🛡️ 六类扫描器真实接入
 
-| 类型 | 扫描器 | 触发方式 | 说明 |
-|------|--------|----------|------|
-| SAST | SonarQube | 代码提交 | 源码白盒扫描 |
-| SCA | OSV-Scanner | 代码提交 | 离线依赖审计，无网确定性防御 |
-| DAST | OWASP ZAP + Playwright | 凌晨定时 | 动态黑盒 + 爬虫驱动，跨越登录墙 |
-| 移动安全 | MobSF | 发版构建 | APK/IPA 逆向 + 隐私合规审计 |
-| API/架构 | Nuclei | 周末 / 0day 爆发 | YAML 模板高速撞库扫描 |
-| 端到端 | Playwright (TraceId) | 动态扫描 | 全链路 W3C traceparent + B3 TraceId 注入 |
+| 类型     | 扫描器      | 触发方式         | 说明                                    |
+| -------- | ----------- | ---------------- | --------------------------------------- |
+| SAST     | SonarQube   | 代码提交         | 源码白盒扫描                            |
+| SCA      | OSV-Scanner | 代码提交         | 离线依赖审计，无网确定性防御            |
+| DAST     | OWASP ZAP   | 凌晨定时         | 动态黑盒漏洞扫描                        |
+| 浏览器   | Playwright  | 动态扫描辅助     | 爬虫驱动跨越登录墙 + TraceId 全链路染色 |
+| 移动安全 | MobSF       | 发版构建         | APK/IPA 逆向 + 隐私合规审计             |
+| API/架构 | Nuclei      | 周末 / 0day 爆发 | YAML 模板高速撞库扫描                   |
 
 ### 🎨 金融级流量染色与影子区
 
@@ -97,6 +97,13 @@ SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDo
 - **TOP 风险**：高危漏洞 / 高频问题快速定位
 - **多维统计**：严重级别 / CWE / 文件 / 项目多维度分析
 
+### 🎛️ 项目级扫描配置（一键扫描）
+
+- **每项目独立配置**：6 类扫描器可分别开关，互不影响
+- **一键触发扫描**：项目详情页一键启动所有已启用扫描器
+- **参数自定义**：每扫描器支持独立参数配置
+- **定时调度**：支持按项目设置扫描计划
+
 ### 🧪 第三方渗透测试管理
 
 - PenTest 项目全生命周期管理
@@ -129,9 +136,13 @@ SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDo
 ┌───────────────────────────────────▼──────────────────────────────┐
 │                      数据面 (Data Plane)                         │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
-│  │ SonarQube│ │ OSV      │ │ ZAP +    │ │ MobSF    │ │ Nuclei │ │
-│  │ SAST     │ │ SCA      │ │ Playwright││ 移动端   │ │ API    │ │
+│  │ SonarQube│ │ OSV      │ │ ZAP      │ │Playwright│ │ MobSF  │ │
+│  │ SAST     │ │ SCA      │ │ DAST     │ │ 浏览器爬虫│ │ 移动端 │ │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────┘ │
+│  ┌──────────┐                                                   │
+│  │ Nuclei   │                                                   │
+│  │ API      │                                                   │
+│  └──────────┘                                                   │
 │                                                                  │
 │  流量染色 → 影子 Redis (secops:*) → 影子 MQ (-shadow)             │
 └─────────────────────────────────────────────────────────────────┘
@@ -164,52 +175,52 @@ SecPilot 是一款企业级统一安全自动化管理平台，基于 **DefectDo
 
 ### 后端
 
-| 技术 | 用途 |
-|------|------|
-| Node.js | 运行时 |
-| Fastify | Web 框架 |
-| TypeScript | 类型安全 |
-| Prisma | ORM |
-| PostgreSQL | 主数据库 |
-| Redis | 缓存 / 队列 |
-| BullMQ | 任务队列 |
-| Zod | 参数校验 |
-| JWT | 身份认证 |
+| 技术       | 用途        |
+| ---------- | ----------- |
+| Node.js    | 运行时      |
+| Fastify    | Web 框架    |
+| TypeScript | 类型安全    |
+| Prisma     | ORM         |
+| PostgreSQL | 主数据库    |
+| Redis      | 缓存 / 队列 |
+| BullMQ     | 任务队列    |
+| Zod        | 参数校验    |
+| JWT        | 身份认证    |
 
 ### 前端
 
-| 技术 | 用途 |
-|------|------|
-| React | UI 框架 |
-| TypeScript | 类型安全 |
-| Vite | 构建工具 |
+| 技术         | 用途     |
+| ------------ | -------- |
+| React        | UI 框架  |
+| TypeScript   | 类型安全 |
+| Vite         | 构建工具 |
 | Tailwind CSS | 样式框架 |
-| React Query | 数据获取 |
+| React Query  | 数据获取 |
 
 ### 后端安全能力
 
-| 技术 | 用途 |
-|------|------|
-| DefectDojo | 漏洞生命周期管理中台 |
-| SonarQube | SAST 静态代码扫描 |
-| OSV-Scanner | SCA 离线依赖审计 |
-| OWASP ZAP | DAST 动态应用扫描 |
-| Playwright | 浏览器自动化 + 爬虫 + TraceId 注入 |
-| MobSF | 移动应用安全逆向分析 |
-| Nuclei | API / 基础架构漏洞扫描 |
-| AES-256-GCM | 应用层敏感字段加密 |
-| TOTP | MFA 多因素认证 |
+| 技术        | 用途                               |
+| ----------- | ---------------------------------- |
+| DefectDojo  | 漏洞生命周期管理中台               |
+| SonarQube   | SAST 静态代码扫描                  |
+| OSV-Scanner | SCA 离线依赖审计                   |
+| OWASP ZAP   | DAST 动态应用扫描                  |
+| Playwright  | 浏览器自动化 + 爬虫 + TraceId 注入 |
+| MobSF       | 移动应用安全逆向分析               |
+| Nuclei      | API / 基础架构漏洞扫描             |
+| AES-256-GCM | 应用层敏感字段加密                 |
+| TOTP        | MFA 多因素认证                     |
 
 ### DevOps
 
-| 技术 | 用途 |
-|------|------|
-| Docker | 容器化 |
-| Docker Compose | 本地编排 |
-| Nginx | 反向代理 + Header Sanitization |
-| pnpm | 包管理器 |
-| GitHub Required Workflows | Org 级强制合规流水线 |
-| GitLab Compliance Pipelines | Group 级强制合规框架 |
+| 技术                        | 用途                           |
+| --------------------------- | ------------------------------ |
+| Docker                      | 容器化                         |
+| Docker Compose              | 本地编排                       |
+| Nginx                       | 反向代理 + Header Sanitization |
+| pnpm                        | 包管理器                       |
+| GitHub Required Workflows   | Org 级强制合规流水线           |
+| GitLab Compliance Pipelines | Group 级强制合规框架           |
 
 ## 快速开始
 
@@ -247,11 +258,60 @@ pnpm dev
 ```
 
 服务启动后：
+
 - API 服务: http://localhost:3000
 - 前端仪表盘: http://localhost:5173
 - 健康检查: http://localhost:3000/api/health
 
 更详细的快速开始指南请参考 [快速上手指南](docs/QUICKSTART.md)。
+
+### Docker 一键部署
+
+最简单的部署方式，一条命令启动全部服务。
+
+```bash
+# 1. 克隆仓库
+git clone <repository-url>
+cd secpilot
+
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env 修改密码和密钥（生产环境必须修改）
+
+# 3. 启动核心服务（API + 前端 + Postgres + Redis）
+cd infra
+docker compose up -d
+
+# 4. （可选）启动全部扫描器
+docker compose --profile scanners up -d
+```
+
+**服务清单：**
+
+| 服务       | 端口 | 说明                            |
+| ---------- | ---- | ------------------------------- |
+| 前端仪表盘 | 8080 | http://localhost:8080           |
+| API 服务   | 3000 | http://localhost:3000           |
+| PostgreSQL | 5434 | 数据库                          |
+| Redis      | 6378 | 队列 + 缓存                     |
+| SonarQube  | 9000 | SAST 扫描 (scanners profile)    |
+| OWASP ZAP  | 8081 | DAST 扫描 (scanners profile)    |
+| Playwright | —    | 浏览器爬虫扫描，内置 API 镜像   |
+| MobSF      | 8000 | 移动安全扫描 (scanners profile) |
+
+**仅用基础服务（不含扫描器）：**
+
+```bash
+docker compose up -d
+```
+
+**带全部扫描器：**
+
+```bash
+docker compose --profile scanners up -d
+```
+
+**首次启动需要初始化管理员账号，打开 http://localhost:8080 注册即可。**
 
 ## 项目结构
 
@@ -291,27 +351,29 @@ secops-platform/
 
 ### 主要接口
 
-| 模块 | 端点前缀 | 说明 |
-|------|----------|------|
-| 认证 | `/api/auth/*` | 登录、MFA、Token 管理 |
-| 用户 | `/api/users/*` | 用户 CRUD、角色管理 |
-| 项目 | `/api/projects/*` | 项目 CRUD、统计 |
-| 扫描 | `/api/scans/*` | 扫描任务管理、门禁检查 |
-| 漏洞 | `/api/findings/*` | 漏洞查询、去重、误报标记 |
-| 仪表盘 | `/api/dashboard/*` | 仪表盘统计数据 |
-| Bypass | `/api/bypass/*` | 紧急绕过管理、审批 |
-| GitHub 集成 | `/api/github-integrations/*` | 项目级 GitHub 集成 |
-| GitHub Org | `/api/github-org-integrations/*` | Org 级强制合规流水线 |
-| GitLab 集成 | `/api/gitlab-integrations/*` | 项目级 GitLab 集成 |
-| GitLab Group | `/api/gitlab-group-integrations/*` | Group 级强制合规框架 |
-| DefectDojo | `/api/integrations/defectdojo/*` | DD 同步、配置 |
-| 系统配置 | `/api/system-config/*` | 全局配置管理 |
-| 审计日志 | `/api/audit-logs/*` | 操作审计追溯 |
-| API Keys | `/api/api-keys/*` | API 凭证管理 |
-| 应用发布 | `/api/app-releases/*` | 发版哈希链、MobSF 审计 |
-| 流水线 | `/api/pipeline/*` | 四阶段流水线配置 |
-| 渗透测试 | `/api/pentests/*` | 第三方 PenTest 管理 |
-| 健康检查 | `/api/health` | 服务健康状态 |
+| 模块         | 端点前缀                            | 说明                       |
+| ------------ | ----------------------------------- | -------------------------- |
+| 认证         | `/api/auth/*`                       | 登录、MFA、Token 管理      |
+| 用户         | `/api/users/*`                      | 用户 CRUD、角色管理        |
+| 项目         | `/api/projects/*`                   | 项目 CRUD、统计、扫描配置  |
+| 扫描         | `/api/scans/*`                      | 扫描任务管理、门禁检查     |
+| 项目扫描配置 | `/api/projects/:id/scanner-configs` | 项目级扫描器开关与参数配置 |
+| 一键扫描     | `/api/projects/:id/scan`            | 触发项目所有已启用扫描器   |
+| 漏洞         | `/api/findings/*`                   | 漏洞查询、去重、误报标记   |
+| 仪表盘       | `/api/dashboard/*`                  | 仪表盘统计数据             |
+| Bypass       | `/api/bypass/*`                     | 紧急绕过管理、审批         |
+| GitHub 集成  | `/api/github-integrations/*`        | 项目级 GitHub 集成         |
+| GitHub Org   | `/api/github-org-integrations/*`    | Org 级强制合规流水线       |
+| GitLab 集成  | `/api/gitlab-integrations/*`        | 项目级 GitLab 集成         |
+| GitLab Group | `/api/gitlab-group-integrations/*`  | Group 级强制合规框架       |
+| DefectDojo   | `/api/integrations/defectdojo/*`    | DD 同步、配置              |
+| 系统配置     | `/api/system-config/*`              | 全局配置管理               |
+| 审计日志     | `/api/audit-logs/*`                 | 操作审计追溯               |
+| API Keys     | `/api/api-keys/*`                   | API 凭证管理               |
+| 应用发布     | `/api/app-releases/*`               | 发版哈希链、MobSF 审计     |
+| 流水线       | `/api/pipeline/*`                   | 四阶段流水线配置           |
+| 渗透测试     | `/api/pentests/*`                   | 第三方 PenTest 管理        |
+| 健康检查     | `/api/health`                       | 服务健康状态               |
 
 ## CI/CD 集成
 
@@ -319,19 +381,19 @@ secops-platform/
 
 ### 强制合规模式
 
-| 平台 | 机制 | 级别 | 说明 |
-|------|------|------|------|
-| GitHub | Required Workflows | Org 级 | Org 级别强制工作流，所有 PR 必须通过 |
+| 平台   | 机制                 | 级别     | 说明                                          |
+| ------ | -------------------- | -------- | --------------------------------------------- |
+| GitHub | Required Workflows   | Org 级   | Org 级别强制工作流，所有 PR 必须通过          |
 | GitLab | Compliance Pipelines | Group 级 | Group 级别合规框架，项目无法删除 include 逃避 |
 
 ### 四阶段流水线
 
-| 阶段 | 触发 | 扫描器 | 阻断策略 |
-|------|------|--------|----------|
-| 白天快扫 | Commit / PR | SonarQube + OSV | Critical/High 阻断 |
-| 夜间深扫 | 凌晨 2:00 Cron | ZAP + Playwright | 报警 + 宽限期 |
-| 发版审计 | Tag / 加固前 | MobSF + 哈希链 | 全部阻断 |
-| 应急巡检 | 0day 爆发时 | Nuclei | 按 CVE 等级 |
+| 阶段     | 触发           | 扫描器           | 阻断策略           |
+| -------- | -------------- | ---------------- | ------------------ |
+| 白天快扫 | Commit / PR    | SonarQube + OSV  | Critical/High 阻断 |
+| 夜间深扫 | 凌晨 2:00 Cron | ZAP + Playwright | 报警 + 宽限期      |
+| 发版审计 | Tag / 加固前   | MobSF + 哈希链   | 全部阻断           |
+| 应急巡检 | 0day 爆发时    | Nuclei           | 按 CVE 等级        |
 
 ### 流水线模板位置
 
@@ -351,14 +413,21 @@ packages/ci-templates/
 业务系统接入流量染色与影子区隔离：
 
 ```typescript
-import { createDyeMiddleware, createShadowRedis, createShadowMq } from '@secops/traffic-dye';
+import {
+  createDyeMiddleware,
+  createShadowRedis,
+  createShadowMq,
+} from "@secops/traffic-dye";
 
 // Express/Fastify 中间件：自动识别染色流量 + Mock 路由
 const dyeMiddleware = createDyeMiddleware({
   salt: process.env.SECURITY_DYE_SALT!,
   mockRoutes: [
-    { path: '/api/sms/send', responseBody: { ok: true, simulated: true } },
-    { path: '/api/wallet/deduct', handler: (req, res) => res.json({ status: 'mock' }) },
+    { path: "/api/sms/send", responseBody: { ok: true, simulated: true } },
+    {
+      path: "/api/wallet/deduct",
+      handler: (req, res) => res.json({ status: "mock" }),
+    },
   ],
 });
 
@@ -422,7 +491,6 @@ chore: 构建/工具链相关
 
 ## 相关文档
 
-- [统一安全自动化管理平台设计文档](docs/统一安全自动化管理平台.md) - 完整设计文档与技术决策依据
 - [架构设计文档](docs/ARCHITECTURE.md) - 详细的系统架构说明
 - [快速上手指南](docs/QUICKSTART.md) - 环境搭建和本地运行指南
 - [API 接口文档](docs/API.md) - 完整的 API 接口说明
@@ -451,4 +519,4 @@ MIT License
 如有问题或建议，欢迎通过以下方式联系：
 
 - 提交 Issue
-- 发送邮件至 [secops@example.com]
+- 发送邮件至 [lzyagi@agent.qq.com]

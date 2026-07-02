@@ -1,11 +1,13 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { hash } from 'bcrypt';
 import { prisma } from '../lib/prisma.js';
 import { UserRole } from '@prisma/client';
 
-function hashPassword(password: string): string {
-  return createHash('sha256').update(password).digest('hex');
+const BCRYPT_ROUNDS = 12;
+
+function hashPassword(password: string): Promise<string> {
+  return hash(password, BCRYPT_ROUNDS);
 }
 
 const createUserSchema = z.object({
@@ -108,7 +110,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(409).send({ error: 'User with this email already exists' });
     }
 
-    const passwordHash = hashPassword(body.password);
+    const passwordHash = await hashPassword(body.password);
 
     const user = await prisma.user.create({
       data: {
@@ -167,7 +169,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.role !== undefined) updateData.role = body.role;
     if (body.mfaEnabled !== undefined) updateData.mfaEnabled = body.mfaEnabled;
     if (body.password) {
-      updateData.passwordHash = hashPassword(body.password);
+      updateData.passwordHash = await hashPassword(body.password);
     }
 
     const updated = await prisma.user.update({
@@ -214,8 +216,6 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'User not found' });
     }
 
-    await prisma.user.delete({ where: { id } });
-
     await prisma.auditLog.create({
       data: {
         action: 'user.delete',
@@ -226,6 +226,8 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
     });
+
+    await prisma.user.delete({ where: { id } });
 
     return { success: true };
   });

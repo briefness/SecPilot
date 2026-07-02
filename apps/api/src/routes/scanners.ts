@@ -33,7 +33,7 @@ const scannerDefaults: Array<{
     },
   },
   {
-    type: ScanType.DYNAMIC_H5,
+    type: ScanType.DYNAMIC_DAST,
     name: 'DAST 动态黑盒扫描',
     description: '模拟黑客攻击，从外部测试运行中 Web 应用的安全漏洞',
     icon: 'Globe',
@@ -42,6 +42,18 @@ const scannerDefaults: Array<{
       spiderDepth: 5,
       activeScan: true,
       passiveScan: true,
+    },
+  },
+  {
+    type: ScanType.DYNAMIC_PLAYWRIGHT,
+    name: 'Playwright 爬虫扫描',
+    description: '浏览器自动化爬虫，支持全链路 TraceId 流量染色',
+    icon: 'MousePointerClick',
+    defaultParams: {
+      maxPages: 50,
+      useZapProxy: true,
+      enableTrafficDye: false,
+      crawlUrls: [],
     },
   },
   {

@@ -3,6 +3,17 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { Severity, ScanType } from '@prisma/client';
 
+function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
+  const latestMap = new Map<string, T>();
+  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const f of sorted) {
+    if (!latestMap.has(f.dedupHash)) {
+      latestMap.set(f.dedupHash, f);
+    }
+  }
+  return Array.from(latestMap.values());
+}
+
 const reportQuerySchema = z.object({
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
@@ -22,11 +33,15 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
         ...(query.projectId ? { projectId: query.projectId } : {}),
       },
       select: {
+        id: true,
+        dedupHash: true,
         createdAt: true,
         severity: true,
         falsePositive: true,
       },
     });
+
+    const deduped = dedupeFindingsLatest(findings);
 
     const days: Record<string, Record<Severity, number>> = {};
     const start = new Date(thirtyDaysAgo);
@@ -36,7 +51,7 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
       start.setDate(start.getDate() + 1);
     }
 
-    for (const f of findings) {
+    for (const f of deduped) {
       if (f.falsePositive) continue;
       const dateStr = f.createdAt.toISOString().split('T')[0];
       if (days[dateStr]) {
@@ -64,15 +79,25 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
       if (query.to) (where.createdAt as Record<string, Date>).lte = query.to;
     }
 
-    const [critical, high, medium, low, info] = await Promise.all([
-      prisma.finding.count({ where: { ...where, severity: Severity.CRITICAL } }),
-      prisma.finding.count({ where: { ...where, severity: Severity.HIGH } }),
-      prisma.finding.count({ where: { ...where, severity: Severity.MEDIUM } }),
-      prisma.finding.count({ where: { ...where, severity: Severity.LOW } }),
-      prisma.finding.count({ where: { ...where, severity: Severity.INFO } }),
-    ]);
+    const allFindings = await prisma.finding.findMany({
+      where,
+      select: { id: true, dedupHash: true, createdAt: true, severity: true },
+    });
 
-    const total = critical + high + medium + low + info;
+    const deduped = dedupeFindingsLatest(allFindings);
+
+    let critical = 0, high = 0, medium = 0, low = 0, info = 0;
+    for (const f of deduped) {
+      switch (f.severity) {
+        case Severity.CRITICAL: critical++; break;
+        case Severity.HIGH: high++; break;
+        case Severity.MEDIUM: medium++; break;
+        case Severity.LOW: low++; break;
+        case Severity.INFO: info++; break;
+      }
+    }
+
+    const total = deduped.length;
 
     return {
       bySeverity: { CRITICAL: critical, HIGH: high, MEDIUM: medium, LOW: low, INFO: info },
@@ -84,21 +109,33 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
     const projects = await prisma.project.findMany({
       include: {
         _count: {
-          select: { findings: true, scanTasks: true },
-        },
-        findings: {
-          where: { falsePositive: false },
-          select: { severity: true },
+          select: { scanTasks: true },
         },
       },
       orderBy: { name: 'asc' },
     });
 
+    const allFindings = await prisma.finding.findMany({
+      where: { falsePositive: false },
+      select: { id: true, dedupHash: true, createdAt: true, projectId: true, severity: true },
+    });
+
+    const deduped = dedupeFindingsLatest(allFindings);
+
+    const projectFindingsMap = new Map<string, typeof deduped>();
+    for (const f of deduped) {
+      if (!projectFindingsMap.has(f.projectId)) {
+        projectFindingsMap.set(f.projectId, []);
+      }
+      projectFindingsMap.get(f.projectId)!.push(f);
+    }
+
     const compliance = projects.map((p) => {
-      const critical = p.findings.filter((f) => f.severity === Severity.CRITICAL).length;
-      const high = p.findings.filter((f) => f.severity === Severity.HIGH).length;
-      const medium = p.findings.filter((f) => f.severity === Severity.MEDIUM).length;
-      const low = p.findings.filter((f) => f.severity === Severity.LOW).length;
+      const projectFindings = projectFindingsMap.get(p.id) || [];
+      const critical = projectFindings.filter((f) => f.severity === Severity.CRITICAL).length;
+      const high = projectFindings.filter((f) => f.severity === Severity.HIGH).length;
+      const medium = projectFindings.filter((f) => f.severity === Severity.MEDIUM).length;
+      const low = projectFindings.filter((f) => f.severity === Severity.LOW).length;
 
       let status: 'compliant' | 'warning' | 'critical' | 'unknown';
       if (p._count.scanTasks === 0) {
@@ -118,7 +155,7 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
         type: p.type,
         status,
         findingsCount: { CRITICAL: critical, HIGH: high, MEDIUM: medium, LOW: low },
-        totalFindings: p._count.findings,
+        totalFindings: projectFindings.length,
         totalScans: p._count.scanTasks,
         lastScanAt: p.lastScanAt,
       };
@@ -153,7 +190,7 @@ const reportsRoutes: FastifyPluginAsync = async (fastify) => {
       if (query.to) (where.triggeredAt as Record<string, Date>).lte = query.to;
     }
 
-    const scanTypes = [ScanType.STATIC_SAST, ScanType.STATIC_SCA, ScanType.DYNAMIC_H5, ScanType.MOBILE_MOBSF, ScanType.API_NUCLEI];
+    const scanTypes = [ScanType.STATIC_SAST, ScanType.STATIC_SCA, ScanType.DYNAMIC_DAST, ScanType.DYNAMIC_PLAYWRIGHT, ScanType.MOBILE_MOBSF, ScanType.API_NUCLEI];
 
     const byType = await Promise.all(
       scanTypes.map(async (type) => {

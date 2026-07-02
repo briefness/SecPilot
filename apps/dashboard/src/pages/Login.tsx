@@ -4,7 +4,7 @@ import { Shield, Eye, EyeOff, Loader2, KeyRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { setToken, setUser } from '@/lib/auth'
+import { setUser } from '@/lib/auth'
 import api from '@/lib/api'
 
 type LoginStep = 'credentials' | 'mfa'
@@ -32,7 +32,6 @@ export default function Login() {
         setStep('mfa')
         return
       }
-      setToken(response.token)
       setUser(response.user)
       navigate('/')
     } catch (err: any) {
@@ -49,7 +48,6 @@ export default function Login() {
 
     try {
       const response = await api.post('/auth/mfa/verify', { tempToken, code: mfaCode }) as any
-      setToken(response.token)
       setUser(response.user)
       navigate('/')
     } catch (err: any) {

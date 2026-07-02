@@ -1,8 +1,30 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { compare } from 'bcrypt';
 import { prisma } from '../lib/prisma.js';
 import { generateTOTPSecret, verifyTOTP, generateOTPAuthURL, qrCodeDataURL } from '../lib/totp.js';
+import { config } from '../config.js';
+
+const LOGIN_RATE_LIMIT = 10;
+const LOGIN_RATE_WINDOW_MS = 60 * 1000;
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function checkLoginRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_RATE_WINDOW_MS });
+    return true;
+  }
+
+  if (entry.count >= LOGIN_RATE_LIMIT) {
+    return false;
+  }
+
+  entry.count++;
+  return true;
+}
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -16,6 +38,7 @@ const mfaVerifySchema = z.object({
 
 const mfaEnableSchema = z.object({
   code: z.string().length(6),
+  setupToken: z.string().min(1),
 });
 
 const mfaDisableSchema = z.object({
@@ -24,7 +47,27 @@ const mfaDisableSchema = z.object({
 });
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
+  function setAuthCookie(reply: any, token: string) {
+    const isProd = config.NODE_ENV === 'production';
+    reply.header(
+      'Set-Cookie',
+      `token=${token}; Path=/; HttpOnly; SameSite=Lax${isProd ? '; Secure' : ''}; Max-Age=86400`
+    );
+  }
+
+  function clearAuthCookie(reply: any) {
+    const isProd = config.NODE_ENV === 'production';
+    reply.header(
+      'Set-Cookie',
+      `token=; Path=/; HttpOnly; SameSite=Lax${isProd ? '; Secure' : ''}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`
+    );
+  }
+
   fastify.post('/api/auth/login', async (request, reply) => {
+    if (!checkLoginRateLimit(request.ip)) {
+      return reply.status(429).send({ error: 'Too many login attempts. Please try again later.' });
+    }
+
     const body = loginSchema.parse(request.body);
 
     const user = await prisma.user.findUnique({
@@ -35,8 +78,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(401).send({ error: 'Invalid credentials' });
     }
 
-    const passwordHash = createHash('sha256').update(body.password).digest('hex');
-    if (user.passwordHash !== passwordHash) {
+    const passwordValid = await compare(body.password, user.passwordHash);
+    if (!passwordValid) {
       return reply.status(401).send({ error: 'Invalid credentials' });
     }
 
@@ -84,8 +127,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
+    setAuthCookie(reply, token);
+
     return {
-      token,
       user: {
         id: user.id,
         email: user.email,
@@ -151,8 +195,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
+    setAuthCookie(reply, token);
+
     return {
-      token,
       user: {
         id: user.id,
         email: user.email,
@@ -212,22 +257,19 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'MFA already enabled' });
     }
 
-    const authHeader = request.headers['authorization'];
-    const token = authHeader?.replace('Bearer ', '');
-
-    if (!token) {
-      return reply.status(400).send({ error: 'Setup token required. Call /mfa/setup first.' });
-    }
-
     let decoded: any;
     try {
-      decoded = fastify.jwt.verify(token);
+      decoded = fastify.jwt.verify(body.setupToken);
     } catch {
       return reply.status(400).send({ error: 'Invalid or expired setup session' });
     }
 
     if (!decoded.mfaSetup || !decoded.mfaSecret) {
       return reply.status(400).send({ error: 'Setup not initiated' });
+    }
+
+    if (decoded.userId !== user.id) {
+      return reply.status(400).send({ error: 'Setup token does not match current user' });
     }
 
     if (!verifyTOTP(body.code, decoded.mfaSecret)) {
@@ -268,8 +310,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'MFA not enabled' });
     }
 
-    const passwordHash = createHash('sha256').update(body.password).digest('hex');
-    if (user.passwordHash !== passwordHash) {
+    const passwordValid = await compare(body.password, user.passwordHash);
+    if (!passwordValid) {
       return reply.status(401).send({ error: 'Invalid password' });
     }
 
@@ -305,7 +347,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     return { mfaEnabled: user?.mfaEnabled ?? false };
   });
 
-  fastify.get('/api/auth/me', async (request) => {
+  fastify.get('/api/auth/me', async (request, reply) => {
     const user = await prisma.user.findUnique({
       where: { id: request.user.userId },
       select: {
@@ -318,10 +360,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
+    if (!user) {
+      clearAuthCookie(reply);
+      return reply.status(401).send({ error: 'User not found' });
+    }
+
     return { user };
   });
 
-  fastify.post('/api/auth/logout', async (request) => {
+  fastify.post('/api/auth/logout', async (request, reply) => {
     await prisma.auditLog.create({
       data: {
         action: 'user.logout',
@@ -332,6 +379,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
+    clearAuthCookie(reply);
     return { success: true };
   });
 };

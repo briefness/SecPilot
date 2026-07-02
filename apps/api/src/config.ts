@@ -28,7 +28,10 @@ const envSchema = z.object({
   PLAYWRIGHT_ENABLED: z.string().optional(),
   ZAP_PROXY_URL: z.string().url().optional(),
   TRAFFIC_DYE_ENABLED: z.string().optional(),
-  SLACK_WEBHOOK_URL: z.string().url().optional(),
+  SLACK_WEBHOOK_URL: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.string().url().optional()
+  ),
   PAGERDUTY_ROUTING_KEY: z.string().optional(),
 });
 

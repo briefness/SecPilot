@@ -1,10 +1,12 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
+import { ToastProvider } from '@/components/ui/use-toast'
 import Sidebar from '@/components/layout/Sidebar'
 import Topbar from '@/components/layout/Topbar'
 import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
 import Projects from '@/pages/Projects'
+import ProjectDetail from '@/pages/ProjectDetail'
 import Scans from '@/pages/Scans'
 import Scanners from '@/pages/Scanners'
 import Findings from '@/pages/Findings'
@@ -22,13 +24,35 @@ import GitlabIntegration from '@/pages/GitlabIntegration'
 import GithubIntegration from '@/pages/GithubIntegration'
 import ApiKeys from '@/pages/ApiKeys'
 import Integration from '@/pages/Integration'
-import { isAuthenticated } from '@/lib/auth'
+import { isAuthenticated, setUser, clearAuth } from '@/lib/auth'
+import api from '@/lib/api'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const [auth, setAuth] = useState<boolean | null>(null)
 
   useEffect(() => {
-    setAuth(isAuthenticated())
+    async function verify() {
+      if (!isAuthenticated()) {
+        setAuth(false)
+        return
+      }
+
+      try {
+        const res = await api.get('/auth/me') as any
+        if (res?.user) {
+          setUser(res.user)
+          setAuth(true)
+        } else {
+          clearAuth()
+          setAuth(false)
+        }
+      } catch {
+        clearAuth()
+        setAuth(false)
+      }
+    }
+
+    verify()
   }, [])
 
   if (auth === null) {
@@ -58,7 +82,8 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <Routes>
+    <ToastProvider>
+      <Routes>
       <Route path="/login" element={<Login />} />
       <Route
         path="/"
@@ -76,6 +101,16 @@ export default function App() {
           <PrivateRoute>
             <AppLayout>
               <Projects />
+            </AppLayout>
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/projects/:id"
+        element={
+          <PrivateRoute>
+            <AppLayout>
+              <ProjectDetail />
             </AppLayout>
           </PrivateRoute>
         }
@@ -252,5 +287,6 @@ export default function App() {
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </ToastProvider>
   )
 }

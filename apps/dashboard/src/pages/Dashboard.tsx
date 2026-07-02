@@ -44,7 +44,8 @@ const severityColors: Record<RiskLevel, string> = {
 const scanTypeLabels: Record<string, string> = {
   STATIC_SAST: 'SAST 静态分析',
   STATIC_SCA: 'SCA 依赖扫描',
-  DYNAMIC_H5: 'H5 动态扫描',
+  DYNAMIC_DAST: 'DAST 动态扫描',
+  DYNAMIC_PLAYWRIGHT: 'Playwright 爬虫',
   MOBILE_MOBSF: '移动安全扫描',
   API_NUCLEI: 'API 漏洞扫描',
 }
@@ -204,11 +205,12 @@ export default function Dashboard() {
         data: stats ? [
           { value: stats.scanTypeDistribution.STATIC_SAST, name: 'SAST' },
           { value: stats.scanTypeDistribution.STATIC_SCA, name: 'SCA' },
-          { value: stats.scanTypeDistribution.DYNAMIC_H5, name: 'H5' },
+          { value: stats.scanTypeDistribution.DYNAMIC_DAST, name: 'DAST' },
+          { value: stats.scanTypeDistribution.DYNAMIC_PLAYWRIGHT, name: 'Playwright' },
           { value: stats.scanTypeDistribution.MOBILE_MOBSF, name: '移动' },
           { value: stats.scanTypeDistribution.API_NUCLEI, name: 'API' },
         ] : [],
-        color: ['#fafafa', '#a1a1aa', '#71717a', '#52525b', '#3f3f46'],
+        color: ['#fafafa', '#a1a1aa', '#71717a', '#52525b', '#3f3f46', '#27272a'],
       },
     ],
   }

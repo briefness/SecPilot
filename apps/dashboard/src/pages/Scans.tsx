@@ -60,7 +60,8 @@ const statusConfig: Record<string, { label: string; variant: 'success' | 'warnin
 const scanTypes: { value: ScanType; label: string }[] = [
   { value: 'STATIC_SAST', label: 'SAST - 静态代码分析' },
   { value: 'STATIC_SCA', label: 'SCA - 软件成分分析' },
-  { value: 'DYNAMIC_H5', label: 'H5 - 动态应用安全测试' },
+  { value: 'DYNAMIC_DAST', label: 'DAST - 动态应用安全测试' },
+  { value: 'DYNAMIC_PLAYWRIGHT', label: 'Playwright - 浏览器爬虫扫描' },
   { value: 'MOBILE_MOBSF', label: 'Mobile - 移动安全扫描' },
   { value: 'API_NUCLEI', label: 'API - Nuclei 漏洞扫描' },
 ]
@@ -117,7 +118,7 @@ export default function Scans() {
   }
 
   const needsTargetUrl = (type: string) => {
-    return type === 'DYNAMIC_H5' || type === 'API_NUCLEI'
+    return type === 'DYNAMIC_DAST' || type === 'DYNAMIC_PLAYWRIGHT' || type === 'API_NUCLEI'
   }
 
   const totalFindings = (scan: Scan) => {

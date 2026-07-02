@@ -620,9 +620,9 @@ jobs:
             -H "Content-Type: application/json" \\
             -d '{
               "project_id": "$SECPILOT_PRODUCT_ID",
-              "branch": "${{ github.ref_name }}",
-              "commit_hash": "${{ github.sha }}",
-              "pr_number": "${{ github.event.pull_request.number }}"
+              "branch": "\${{ github.ref_name }}",
+              "commit_hash": "\${{ github.sha }}",
+              "pr_number": "\${{ github.event.pull_request.number }}"
             }')
           HTTP_BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:.*//')
           HTTP_CODE=$(echo "$RESPONSE" | grep -oE 'HTTP_STATUS:[0-9]+' | cut -d: -f2)

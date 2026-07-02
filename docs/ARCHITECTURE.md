@@ -79,12 +79,12 @@
 
 ### 架构特性
 
-| 特性 | 说明 |
-|------|------|
-| 高内聚低耦合 | 各模块职责清晰，通过接口交互 |
-| 水平可扩展 | 扫描 Worker 可独立水平扩展 |
-| 故障隔离 | 控制面故障不影响已染色请求的处理 |
-| 多云部署 | 数据面可部署在业务 VPC 内，数据不出域 |
+| 特性         | 说明                                  |
+| ------------ | ------------------------------------- |
+| 高内聚低耦合 | 各模块职责清晰，通过接口交互          |
+| 水平可扩展   | 扫描 Worker 可独立水平扩展            |
+| 故障隔离     | 控制面故障不影响已染色请求的处理      |
+| 多云部署     | 数据面可部署在业务 VPC 内，数据不出域 |
 
 ## 控制面设计
 
@@ -158,11 +158,11 @@ PENDING → RUNNING → COMPLETED
 
 #### Worker 类型
 
-| Worker 类型 | 处理任务 | 扩展方式 |
-|------------|----------|----------|
-| SAST Worker | 静态代码分析 | 按代码量扩展 |
-| SCA Worker | 组件漏洞扫描 | 按依赖数量扩展 |
-| DAST Worker | 动态应用测试 | 按 URL 数量扩展 |
+| Worker 类型   | 处理任务     | 扩展方式        |
+| ------------- | ------------ | --------------- |
+| SAST Worker   | 静态代码分析 | 按代码量扩展    |
+| SCA Worker    | 组件漏洞扫描 | 按依赖数量扩展  |
+| DAST Worker   | 动态应用测试 | 按 URL 数量扩展 |
 | Mobile Worker | 移动应用扫描 | 按 App 数量扩展 |
 
 ### 流量染色代理
@@ -187,12 +187,12 @@ PENDING → RUNNING → COMPLETED
 
 #### 染色标识组成
 
-| Header | 说明 |
-|--------|------|
+| Header                | 说明                                 |
+| --------------------- | ------------------------------------ |
 | `X-SecOps-Simulation` | 模拟标识，值为 `True` 表示是染色请求 |
-| `X-SecOps-Sign` | HMAC-SHA256 签名，防止伪造 |
-| `X-SecOps-Timestamp` | 请求时间戳，防止重放 |
-| `X-B3-TraceId` | （可选）链路追踪 ID |
+| `X-SecOps-Sign`       | HMAC-SHA256 签名，防止伪造           |
+| `X-SecOps-Timestamp`  | 请求时间戳，防止重放                 |
+| `X-B3-TraceId`        | （可选）链路追踪 ID                  |
 
 ### 工作流程
 
@@ -249,24 +249,24 @@ PENDING → RUNNING → COMPLETED
 
 ### 影子资源命名规范
 
-| 资源类型 | 前缀/后缀 | 示例 |
-|----------|----------|------|
-| Redis Key | `secops:shadow:` 前缀 | `secops:shadow:user:123` |
-| MQ 队列 | `-shadow` 后缀 | `order-queue-shadow` |
-| 数据库 Schema | `shadow_` 前缀 | `shadow_orders` |
+| 资源类型      | 前缀/后缀             | 示例                     |
+| ------------- | --------------------- | ------------------------ |
+| Redis Key     | `secops:shadow:` 前缀 | `secops:shadow:user:123` |
+| MQ 队列       | `-shadow` 后缀        | `order-queue-shadow`     |
+| 数据库 Schema | `shadow_` 前缀        | `shadow_orders`          |
 
 ### 流量染色代码示例
 
 ```typescript
-import { TrafficDye } from '@secops/traffic-dye';
+import { TrafficDye } from "@secops/traffic-dye";
 
 const dye = new TrafficDye({
-  salt: 'your-secret-salt',
+  salt: "your-secret-salt",
   timeWindowSeconds: 300,
 });
 
 // 生成染色请求头
-const headers = dye.generateHeaders('trace-id-123');
+const headers = dye.generateHeaders("trace-id-123");
 // {
 //   'X-SecOps-Simulation': 'True',
 //   'X-SecOps-Sign': 'abc123...',
@@ -278,7 +278,7 @@ const headers = dye.generateHeaders('trace-id-123');
 const result = dye.verify(req.headers, req.ip);
 if (result.valid) {
   // 路由到影子资源
-  const shadowKey = dye.getShadowRedisKey('user:123');
+  const shadowKey = dye.getShadowRedisKey("user:123");
 }
 ```
 
@@ -289,6 +289,7 @@ if (result.valid) {
 ### 为什么需要去重？
 
 在实际安全运营中：
+
 - 多个扫描工具可能报出同一个漏洞
 - 同一次扫描中同一类问题可能出现多次
 - 不同分支/版本的相同漏洞重复上报
@@ -302,14 +303,14 @@ if (result.valid) {
 
 #### 特征维度
 
-| 特征 | 说明 | 归一化方式 |
-|------|------|-----------|
-| CWE/CVE | 漏洞类型标识 | 大写、去空格 |
-| 文件路径 | 漏洞所在文件 | 原始路径 |
-| 代码行号 | 漏洞起始行 | 数字 |
-| 位置 | URL / API 端点 | 原始字符串 |
-| 漏洞标题 | 漏洞名称 | 小写、去空格 |
-| 参数 | 请求参数 | 按键排序后拼接 |
+| 特征     | 说明           | 归一化方式     |
+| -------- | -------------- | -------------- |
+| CWE/CVE  | 漏洞类型标识   | 大写、去空格   |
+| 文件路径 | 漏洞所在文件   | 原始路径       |
+| 代码行号 | 漏洞起始行     | 数字           |
+| 位置     | URL / API 端点 | 原始字符串     |
+| 漏洞标题 | 漏洞名称       | 小写、去空格   |
+| 参数     | 请求参数       | 按键排序后拼接 |
 
 #### 去重类型
 
@@ -372,77 +373,77 @@ if (result.valid) {
 
 #### User（用户表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 用户 ID (CUID) |
-| email | String | 邮箱（唯一） |
-| name | String | 姓名 |
-| role | Enum | 角色：ADMIN/DEVELOPER/AUDITOR/VIEWER |
-| mfaEnabled | Boolean | MFA 是否已启用 |
-| passwordHash | String | 密码哈希 |
+| 字段         | 类型    | 说明                                 |
+| ------------ | ------- | ------------------------------------ |
+| id           | String  | 用户 ID (CUID)                       |
+| email        | String  | 邮箱（唯一）                         |
+| name         | String  | 姓名                                 |
+| role         | Enum    | 角色：ADMIN/DEVELOPER/AUDITOR/VIEWER |
+| mfaEnabled   | Boolean | MFA 是否已启用                       |
+| passwordHash | String  | 密码哈希                             |
 
 #### Project（项目表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 项目 ID |
-| name | String | 项目名称 |
-| productId | String | 产品唯一标识（唯一） |
-| gitRepo | String | Git 仓库地址 |
-| type | Enum | 项目类型：WEB/MOBILE/API/INFRA |
-| status | Enum | 状态：ACTIVE/INACTIVE/ONBOARDING |
-| onboardingStage | Int | 接入阶段 (0-5) |
+| 字段            | 类型   | 说明                             |
+| --------------- | ------ | -------------------------------- |
+| id              | String | 项目 ID                          |
+| name            | String | 项目名称                         |
+| productId       | String | 产品唯一标识（唯一）             |
+| gitRepo         | String | Git 仓库地址                     |
+| type            | Enum   | 项目类型：WEB/MOBILE/API/INFRA   |
+| status          | Enum   | 状态：ACTIVE/INACTIVE/ONBOARDING |
+| onboardingStage | Int    | 接入阶段 (0-5)                   |
 
 #### ScanTask（扫描任务表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 任务 ID |
-| type | Enum | 扫描类型 |
-| status | Enum | 状态：PENDING/RUNNING/COMPLETED/FAILED/CANCELLED |
-| projectId | String | 关联项目 |
-| pipelineStage | Enum | 流水线阶段 |
-| traceId | String | 链路追踪 ID |
-| findingsCritical/High/... | Int | 各级别漏洞数 |
+| 字段                      | 类型   | 说明                                             |
+| ------------------------- | ------ | ------------------------------------------------ |
+| id                        | String | 任务 ID                                          |
+| type                      | Enum   | 扫描类型                                         |
+| status                    | Enum   | 状态：PENDING/RUNNING/COMPLETED/FAILED/CANCELLED |
+| projectId                 | String | 关联项目                                         |
+| pipelineStage             | Enum   | 流水线阶段                                       |
+| traceId                   | String | 链路追踪 ID                                      |
+| findingsCritical/High/... | Int    | 各级别漏洞数                                     |
 
 #### Finding（漏洞表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 漏洞 ID |
-| title | String | 漏洞标题 |
-| severity | Enum | 严重级别：CRITICAL/HIGH/MEDIUM/LOW/INFO |
-| cwe | String | CWE 编号 |
-| cve | String | CVE 编号 |
-| cvss | Float | CVSS 评分 |
-| filePath | String | 文件路径 |
-| lineStart/lineEnd | Int | 代码行范围 |
-| location | String | 漏洞位置 (URL 等) |
-| dedupHash | String | 去重哈希 |
-| falsePositive | Boolean | 是否误报 |
+| 字段              | 类型    | 说明                                    |
+| ----------------- | ------- | --------------------------------------- |
+| id                | String  | 漏洞 ID                                 |
+| title             | String  | 漏洞标题                                |
+| severity          | Enum    | 严重级别：CRITICAL/HIGH/MEDIUM/LOW/INFO |
+| cwe               | String  | CWE 编号                                |
+| cve               | String  | CVE 编号                                |
+| cvss              | Float   | CVSS 评分                               |
+| filePath          | String  | 文件路径                                |
+| lineStart/lineEnd | Int     | 代码行范围                              |
+| location          | String  | 漏洞位置 (URL 等)                       |
+| dedupHash         | String  | 去重哈希                                |
+| falsePositive     | Boolean | 是否误报                                |
 
 #### BypassRequest（Bypass 申请表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 申请 ID |
-| projectId | String | 关联项目 |
-| reason | String | 申请原因 |
-| requestedBy | String | 申请人 |
-| expiresAt | DateTime | 过期时间 |
-| status | Enum | 状态：PENDING/APPROVED/REJECTED/EXPIRED |
-| approvedBy | String | 审批人 |
+| 字段        | 类型     | 说明                                    |
+| ----------- | -------- | --------------------------------------- |
+| id          | String   | 申请 ID                                 |
+| projectId   | String   | 关联项目                                |
+| reason      | String   | 申请原因                                |
+| requestedBy | String   | 申请人                                  |
+| expiresAt   | DateTime | 过期时间                                |
+| status      | Enum     | 状态：PENDING/APPROVED/REJECTED/EXPIRED |
+| approvedBy  | String   | 审批人                                  |
 
 #### AuditLog（审计日志表）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | String | 日志 ID |
-| action | String | 操作类型 |
-| userId | String | 操作用户 |
-| projectId | String | 关联项目（可选） |
-| metadata | Json | 操作详情 |
-| createdAt | DateTime | 操作时间 |
+| 字段      | 类型     | 说明             |
+| --------- | -------- | ---------------- |
+| id        | String   | 日志 ID          |
+| action    | String   | 操作类型         |
+| userId    | String   | 操作用户         |
+| projectId | String   | 关联项目（可选） |
+| metadata  | Json     | 操作详情         |
+| createdAt | DateTime | 操作时间         |
 
 ### 索引设计
 
@@ -484,12 +485,12 @@ if (result.valid) {
 
 ### 水平扩展
 
-| 组件 | 扩展方式 | 状态 |
-|------|----------|------|
-| API 服务 | 无状态，多实例部署 | ✅ 支持 |
-| 扫描 Worker | 队列模式，水平扩展 | ✅ 支持 |
-| 数据库 | 读写分离、分库分表 | 🔄 规划中 |
-| Redis | 集群模式 | 🔄 规划中 |
+| 组件        | 扩展方式           | 状态      |
+| ----------- | ------------------ | --------- |
+| API 服务    | 无状态，多实例部署 | ✅ 支持   |
+| 扫描 Worker | 队列模式，水平扩展 | ✅ 支持   |
+| 数据库      | 读写分离、分库分表 | 🔄 规划中 |
+| Redis       | 集群模式           | 🔄 规划中 |
 
 ### 插件化扩展
 

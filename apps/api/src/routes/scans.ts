@@ -1,7 +1,7 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { addScanJob } from '../lib/queue.js';
+import { addScanJob, cancelScanJob } from '../lib/queue.js';
 import { ScanType, ScanStatus, PipelineStage } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 
@@ -179,6 +179,8 @@ const scansRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'Cannot cancel scan in current status' });
     }
 
+    const queueCancelled = await cancelScanJob(id);
+
     const updated = await prisma.scanTask.update({
       where: { id },
       data: {
@@ -192,7 +194,7 @@ const scansRoutes: FastifyPluginAsync = async (fastify) => {
         action: 'scan.cancel',
         userId: request.user.userId,
         projectId: scan.projectId,
-        metadata: { scanId: id },
+        metadata: { scanId: id, queueCancelled },
       },
     });
 

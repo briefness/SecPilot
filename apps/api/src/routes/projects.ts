@@ -1,8 +1,28 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { ProjectType, ProjectStatus, Severity } from '@prisma/client';
+import { ProjectType, ProjectStatus, Severity, ScanType } from '@prisma/client';
 import { getDefectDojoClient } from '../lib/defectdojo.js';
+
+function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
+  const latestMap = new Map<string, T>();
+  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const f of sorted) {
+    if (!latestMap.has(f.dedupHash)) {
+      latestMap.set(f.dedupHash, f);
+    }
+  }
+  return Array.from(latestMap.values());
+}
+
+const DEFAULT_SCANNER_CONFIGS = [
+  { type: ScanType.STATIC_SAST, enabled: true },
+  { type: ScanType.STATIC_SCA, enabled: true },
+  { type: ScanType.DYNAMIC_DAST, enabled: false },
+  { type: ScanType.DYNAMIC_PLAYWRIGHT, enabled: false },
+  { type: ScanType.MOBILE_MOBSF, enabled: false },
+  { type: ScanType.API_NUCLEI, enabled: false },
+];
 
 const createProjectSchema = z.object({
   name: z.string().min(1).max(255),
@@ -102,11 +122,11 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         if (dd.enabled && project.defectdojoProductId) {
           findingSummary = await getFindingSummaryFromDD(project.defectdojoProductId);
         } else {
-          const findingsBySeverity = await prisma.finding.groupBy({
-            by: ['severity'],
+          const allFindings = await prisma.finding.findMany({
             where: { projectId: project.id, falsePositive: false },
-            _count: { severity: true },
+            select: { id: true, dedupHash: true, createdAt: true, severity: true },
           });
+          const deduped = dedupeFindingsLatest(allFindings);
 
           findingSummary = {
             [Severity.CRITICAL]: 0,
@@ -116,8 +136,8 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
             [Severity.INFO]: 0,
           };
 
-          for (const item of findingsBySeverity) {
-            findingSummary[item.severity] = item._count.severity;
+          for (const item of deduped) {
+            findingSummary[item.severity]++;
           }
         }
 
@@ -164,11 +184,11 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     if (dd.enabled && project.defectdojoProductId) {
       findingSummary = await getFindingSummaryFromDD(project.defectdojoProductId);
     } else {
-      const findingsBySeverity = await prisma.finding.groupBy({
-        by: ['severity'],
+      const allFindings = await prisma.finding.findMany({
         where: { projectId: id, falsePositive: false },
-        _count: { severity: true },
+        select: { id: true, dedupHash: true, createdAt: true, severity: true },
       });
+      const deduped = dedupeFindingsLatest(allFindings);
 
       findingSummary = {
         [Severity.CRITICAL]: 0,
@@ -178,8 +198,8 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         [Severity.INFO]: 0,
       };
 
-      for (const item of findingsBySeverity) {
-        findingSummary[item.severity] = item._count.severity;
+      for (const item of deduped) {
+        findingSummary[item.severity]++;
       }
     }
 
@@ -221,6 +241,14 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         ...body,
         defectdojoProductId,
       },
+    });
+
+    await prisma.projectScannerConfig.createMany({
+      data: DEFAULT_SCANNER_CONFIGS.map((c) => ({
+        projectId: project.id,
+        scanType: c.type,
+        enabled: c.enabled,
+      })),
     });
 
     await prisma.auditLog.create({
@@ -290,8 +318,6 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    await prisma.project.delete({ where: { id } });
-
     await prisma.auditLog.create({
       data: {
         action: 'project.delete',
@@ -300,6 +326,8 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         metadata: { name: project.name, productId: project.productId },
       },
     });
+
+    await prisma.project.delete({ where: { id } });
 
     return reply.status(204).send();
   });
@@ -315,16 +343,20 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     let findingSummary: Record<Severity, number>;
     let totalFindings = 0;
+    let localTopFindings: Array<{ id: string; title: string; severity: Severity; cwe: string | null; cve: string | null; cvss: number | null; description: string; location: string | null; filePath: string | null; lineStart: number | null; lineEnd: number | null; scanId: string; projectId: string; dedupHash: string; falsePositive: boolean; createdAt: Date; updatedAt: Date; }> = [];
 
     if (dd.enabled && project.defectdojoProductId) {
       findingSummary = await getFindingSummaryFromDD(project.defectdojoProductId);
       totalFindings = Object.values(findingSummary).reduce((a, b) => a + b, 0);
     } else {
-      const findingsBySeverity = await prisma.finding.groupBy({
-        by: ['severity'],
+      const allFindings = await prisma.finding.findMany({
         where: { projectId: id, falsePositive: false },
-        _count: { severity: true },
+        orderBy: [
+          { severity: 'desc' },
+          { createdAt: 'desc' },
+        ],
       });
+      const deduped = dedupeFindingsLatest(allFindings);
 
       findingSummary = {
         [Severity.CRITICAL]: 0,
@@ -334,13 +366,15 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         [Severity.INFO]: 0,
       };
 
-      for (const item of findingsBySeverity) {
-        findingSummary[item.severity] = item._count.severity;
-        totalFindings += item._count.severity;
+      for (const item of deduped) {
+        findingSummary[item.severity]++;
+        totalFindings++;
       }
+
+      localTopFindings = deduped.slice(0, 10);
     }
 
-    const [totalScans, last30DaysScans, topFindings] = await Promise.all([
+    const [totalScans, last30DaysScans, ddTopFindings] = await Promise.all([
       prisma.scanTask.count({ where: { projectId: id } }),
       prisma.scanTask.count({
         where: {
@@ -374,15 +408,10 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
             createdAt: f.created,
             updatedAt: f.updated,
           })))
-        : prisma.finding.findMany({
-            where: { projectId: id, falsePositive: false },
-            take: 10,
-            orderBy: [
-              { severity: 'desc' },
-              { createdAt: 'desc' },
-            ],
-          }),
+        : Promise.resolve(null),
     ]);
+
+    const topFindings = ddTopFindings ?? localTopFindings;
 
     return {
       findingSummary,

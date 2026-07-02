@@ -1,6 +1,6 @@
 export type RiskLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
 
-export type ScanType = 'STATIC_SAST' | 'STATIC_SCA' | 'DYNAMIC_H5' | 'MOBILE_MOBSF' | 'API_NUCLEI'
+export type ScanType = 'STATIC_SAST' | 'STATIC_SCA' | 'DYNAMIC_DAST' | 'DYNAMIC_PLAYWRIGHT' | 'MOBILE_MOBSF' | 'API_NUCLEI'
 
 export type ScanStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
@@ -53,6 +53,8 @@ export interface Scan {
   findingsInfo: number
   durationSeconds: number | null
   traceId: string | null
+  errorMessage: string | null
+  scannerUsed: string | null
   project: {
     id: string
     name: string
@@ -115,7 +117,8 @@ export interface SeverityDistribution {
 export interface ScanTypeDistribution {
   STATIC_SAST: number
   STATIC_SCA: number
-  DYNAMIC_H5: number
+  DYNAMIC_DAST: number
+  DYNAMIC_PLAYWRIGHT: number
   MOBILE_MOBSF: number
   API_NUCLEI: number
 }
@@ -244,7 +247,7 @@ export interface PipelineStats {
   scanTypeDistribution: Array<{ type: ScanType; count: number }>
 }
 
-export type ScannerType = 'STATIC_SAST' | 'STATIC_SCA' | 'DYNAMIC_H5' | 'MOBILE_MOBSF' | 'API_NUCLEI'
+export type ScannerType = 'STATIC_SAST' | 'STATIC_SCA' | 'DYNAMIC_DAST' | 'DYNAMIC_PLAYWRIGHT' | 'MOBILE_MOBSF' | 'API_NUCLEI'
 
 export interface ScannerConfig {
   id: string

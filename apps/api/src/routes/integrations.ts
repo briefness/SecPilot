@@ -5,6 +5,17 @@ import { prisma } from '../lib/prisma.js';
 import { Severity, ScanStatus, ScanType, FindingStatus, ApiKeyScope } from '@prisma/client';
 import { computeDedupHash } from '../utils/dedup.js';
 
+function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
+  const latestMap = new Map<string, T>();
+  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  for (const f of sorted) {
+    if (!latestMap.has(f.dedupHash)) {
+      latestMap.set(f.dedupHash, f);
+    }
+  }
+  return Array.from(latestMap.values());
+}
+
 const findingSchema = z.object({
   title: z.string().min(1),
   severity: z.union([
@@ -278,11 +289,13 @@ const scannerIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       where.scanId = body.scanId;
     }
 
-    const findings = await prisma.finding.findMany({
+    const allFindings = await prisma.finding.findMany({
       where,
-      select: { id: true, severity: true, title: true },
+      select: { id: true, dedupHash: true, createdAt: true, severity: true, title: true },
       orderBy: { severity: 'desc' },
     });
+
+    const findings = dedupeFindingsLatest(allFindings);
 
     const blockingFindings = findings.filter(
       (f) => severityOrder[f.severity] >= minLevel
