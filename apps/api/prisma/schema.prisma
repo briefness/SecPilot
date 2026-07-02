@@ -1,0 +1,497 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  DEVELOPER
+  AUDITOR
+  VIEWER
+}
+
+enum ProjectType {
+  WEB
+  MOBILE
+  API
+  INFRA
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+  ONBOARDING
+}
+
+enum ScanType {
+  STATIC_SAST
+  STATIC_SCA
+  DYNAMIC_H5
+  MOBILE_MOBSF
+  API_NUCLEI
+}
+
+enum ScanStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PipelineStage {
+  DAY_FAST_SCAN
+  NIGHT_DEEP_SCAN
+  RELEASE_AUDIT
+  EMERGENCY_PATROL
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum BypassStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum BypassSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FindingStatus {
+  NEW
+  CONFIRMED
+  IN_PROGRESS
+  MITIGATED
+  RESOLVED
+  FALSE_POSITIVE
+  ACCEPTED_RISK
+}
+
+enum PentestStatus {
+  PLANNED
+  IN_PROGRESS
+  REPORT_SUBMITTED
+  REMEDIATION
+  CLOSED
+}
+
+enum PentestType {
+  WEB_APP
+  MOBILE_APP
+  API
+  INFRASTRUCTURE
+  RED_TEAM
+  CODE_REVIEW
+}
+
+enum ReleaseStatus {
+  PENDING_SCAN
+  SCANNING
+  SCAN_FAILED
+  SCAN_PASSED
+  HARDENED
+  PUBLISHED
+  FAILED
+}
+
+enum DyeLogAction {
+  GENERATE
+  VERIFY
+}
+
+enum DyeLogResult {
+  SUCCESS
+  FAILED
+}
+
+model ScannerConfig {
+  id           String   @id @default(cuid())
+  type         ScanType @unique
+  name         String
+  description  String?
+  enabled      Boolean  @default(true)
+  icon         String?
+  defaultParams Json?
+  docUrl       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  name        String
+  role        UserRole @default(DEVELOPER)
+  mfaEnabled  Boolean  @default(false)
+  mfaSecret   String?
+  passwordHash String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  auditLogs    AuditLog[]
+  bypassRequestsRequested BypassRequest[] @relation("bypass_requester")
+  bypassRequestsApproved  BypassRequest[] @relation("bypass_approver")
+  assignedFindings Finding[]
+  assignedPentests Pentest[]
+}
+
+model Project {
+  id                   String        @id @default(cuid())
+  name                 String
+  productId            String        @unique
+  gitRepo              String
+  type                 ProjectType
+  status               ProjectStatus @default(ONBOARDING)
+  onboardingStage      Int           @default(0)
+  lastScanAt           DateTime?
+  defectdojoProductId  Int?          @unique
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  scanTasks   ScanTask[]
+  findings    Finding[]
+  bypassRequests BypassRequest[]
+  auditLogs   AuditLog[]
+  appReleases AppRelease[]
+  pentests    Pentest[]
+  gitlabIntegration GitlabIntegration?
+  githubIntegration GithubIntegration?
+  apiKeys     ApiKey[]
+}
+
+model ScanTask {
+  id                String        @id @default(cuid())
+  type              ScanType
+  status            ScanStatus    @default(PENDING)
+  projectId         String
+  project           Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pipelineStage     PipelineStage?
+  targetUrl         String?
+  branch            String?
+  commitHash        String?
+  triggeredBy       String
+  triggeredAt       DateTime      @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  durationSeconds   Int?
+  traceId           String?
+  findingsCritical  Int           @default(0)
+  findingsHigh      Int           @default(0)
+  findingsMedium    Int           @default(0)
+  findingsLow       Int           @default(0)
+  findingsInfo      Int           @default(0)
+  errorMessage      String?
+  scannerUsed       String?
+  defectdojoSynced  Boolean   @default(false)
+  defectdojoTestId  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  findings Finding[]
+  appReleases AppRelease[]
+}
+
+model Finding {
+  id             String        @id @default(cuid())
+  title          String
+  severity       Severity
+  cwe            String?
+  cve            String?
+  cvss           Float?
+  description    String
+  location       String?
+  filePath       String?
+  lineStart      Int?
+  lineEnd        Int?
+  scanId         String?
+  scan           ScanTask?     @relation(fields: [scanId], references: [id], onDelete: SetNull)
+  projectId      String
+  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  dedupHash      String
+  falsePositive  Boolean       @default(false)
+  scannerRef     String?
+  source         String        @default("PLATFORM")
+  status         FindingStatus @default(NEW)
+  assigneeId     String?
+  assignee       User?         @relation(fields: [assigneeId], references: [id])
+  slaDeadline    DateTime?
+  resolvedAt     DateTime?
+  resolutionNote String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @default(now())
+
+  @@index([projectId, severity])
+  @@index([projectId, dedupHash])
+  @@index([scanId])
+  @@index([status])
+  @@index([assigneeId])
+  @@index([slaDeadline])
+}
+
+model BypassRequest {
+  id          String       @id @default(cuid())
+  projectId   String
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reason      String
+  requestedBy String
+  requester   User         @relation("bypass_requester", fields: [requestedBy], references: [id])
+  requestedAt DateTime     @default(now())
+  expiresAt   DateTime
+  status      BypassStatus   @default(PENDING)
+  severity    BypassSeverity @default(MEDIUM)
+  approvedBy  String?
+  approver    User?        @relation("bypass_approver", fields: [approvedBy], references: [id])
+  approvedAt  DateTime?
+  tokenHash   String?      @unique
+  auditLogId  String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+}
+
+model DyeRule {
+  id                 String   @id @default(cuid())
+  name               String   @unique
+  description        String?
+  enabled            Boolean  @default(true)
+  salt               String
+  timeWindowSeconds  Int      @default(300)
+  headerSimulation   String   @default("X-SecOps-Simulation")
+  headerSign         String   @default("X-SecOps-Sign")
+  headerTimestamp    String   @default("X-SecOps-Timestamp")
+  headerTraceId      String   @default("X-B3-TraceId")
+  shadowRedisPrefix  String   @default("secops:shadow:")
+  shadowMqSuffix     String   @default("-shadow")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  whitelistEntries   DyeWhitelist[]
+  dyeLogs            DyeLog[]
+}
+
+model DyeWhitelist {
+  id        String   @id @default(cuid())
+  ruleId    String
+  rule      DyeRule  @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  ip        String
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([ruleId])
+  @@unique([ruleId, ip])
+}
+
+model DyeLog {
+  id        String        @id @default(cuid())
+  ruleId    String
+  rule      DyeRule       @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  action    DyeLogAction
+  result    DyeLogResult
+  traceId   String?
+  clientIp  String?
+  reason    String?
+  metadata  Json?
+  createdAt DateTime      @default(now())
+
+  @@index([ruleId, createdAt])
+  @@index([action, result, createdAt])
+}
+
+enum ConfigCategory {
+  GENERAL
+  SECURITY
+  NOTIFICATION
+  INTEGRATION
+}
+
+model SystemConfig {
+  id          String         @id @default(cuid())
+  key         String         @unique
+  value       Json
+  category    ConfigCategory @default(GENERAL)
+  description String?
+  updatedAt   DateTime       @updatedAt
+  updatedBy   String?
+
+  @@index([category])
+}
+
+model AppRelease {
+  id             String        @id @default(cuid())
+  projectId      String
+  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  version        String
+  buildNumber    String
+  platform       String
+  artifactUrl    String?
+  preHardeningHash String
+  postHardeningHash String?
+  status         ReleaseStatus @default(PENDING_SCAN)
+  scanTaskId     String?
+  scanTask       ScanTask?     @relation(fields: [scanTaskId], references: [id])
+  findingsCritical Int         @default(0)
+  findingsHigh   Int           @default(0)
+  findingsMedium Int           @default(0)
+  findingsLow    Int           @default(0)
+  mobsfReportUrl String?
+  hardenedAt     DateTime?
+  publishedAt    DateTime?
+  triggeredBy    String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@unique([projectId, version, buildNumber, platform])
+}
+
+model Pentest {
+  id             String        @id @default(cuid())
+  projectId      String
+  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title          String
+  type           PentestType
+  vendor         String
+  scope          String
+  status         PentestStatus @default(PLANNED)
+  plannedStartAt DateTime
+  plannedEndAt   DateTime
+  actualStartAt  DateTime?
+  actualEndAt    DateTime?
+  reportUrl      String?
+  findingsTotal  Int           @default(0)
+  findingsCritical Int         @default(0)
+  findingsHigh   Int           @default(0)
+  findingsMedium Int           @default(0)
+  findingsLow    Int           @default(0)
+  remediatedCount Int          @default(0)
+  assigneeId     String?
+  assignee       User?         @relation(fields: [assigneeId], references: [id])
+  notes          String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@index([type])
+}
+
+enum ApiKeyScope {
+  SCANNER
+  CI_CD
+  GATEWAY
+  WEBHOOK
+  READ_ONLY
+  ADMIN
+}
+
+model ApiKey {
+  id          String       @id @default(cuid())
+  name        String
+  keyHash     String       @unique
+  keyPrefix   String
+  scope       ApiKeyScope
+  projectId   String?
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  createdBy   String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([projectId])
+  @@index([scope])
+  @@index([keyHash])
+}
+
+model GitlabIntegration {
+  id             String   @id @default(cuid())
+  projectId      String   @unique
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  groupPath      String
+  projectPath    String
+  webhookToken   String
+  complianceTemplateEnabled Boolean @default(false)
+  securityBypassToken String?
+  lastSyncAt     DateTime?
+  syncStatus     String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model GitlabGroupIntegration {
+  id                     String   @id @default(cuid())
+  groupPath              String   @unique
+  accessToken            String?
+  complianceFrameworkId  Int?
+  complianceFrameworkName String  @default("SecPilot Security Compliance")
+  compliancePipelinePath String   @default(".gitlab/security-compliance.yml")
+  enforcementEnabled     Boolean  @default(false)
+  defaultProjectIds      String?
+  lastSyncAt             DateTime?
+  syncStatus             String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model GithubIntegration {
+  id                       String   @id @default(cuid())
+  projectId                String   @unique
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner                    String
+  repo                     String
+  webhookSecret            String
+  personalAccessToken      String?
+  requiredWorkflowEnabled  Boolean  @default(false)
+  securityBypassToken      String?
+  lastSyncAt               DateTime?
+  syncStatus               String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
+model GithubOrgIntegration {
+  id                    String   @id @default(cuid())
+  orgName               String   @unique
+  appId                 String?
+  installationId        String?
+  privateKey            String?
+  personalAccessToken   String?
+  requiredWorkflowRepo  String?
+  requiredWorkflowPath  String   @default(".github/workflows/secpilot-security.yml")
+  requiredWorkflowRef   String   @default("main")
+  enforcementMode       String   @default("action")
+  enabled               Boolean  @default(false)
+  lastSyncAt            DateTime?
+  syncStatus            String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}

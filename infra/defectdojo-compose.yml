@@ -1,0 +1,132 @@
+services:
+  defectdojo-postgres:
+    image: postgres:15-alpine
+    container_name: defectdojo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: defectdojo_pass_2024
+      POSTGRES_DB: defectdojo
+    ports:
+      - "5433:5432"
+    volumes:
+      - defectdojo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U defectdojo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  defectdojo-redis:
+    image: redis:7-alpine
+    container_name: defectdojo-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"
+    volumes:
+      - defectdojo_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  defectdojo-migrate:
+    image: defectdojo/defectdojo-django:2.30.4
+    platform: linux/amd64
+    container_name: defectdojo-migrate
+    entrypoint: ["/entrypoint-initializer.sh"]
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo_pass_2024@defectdojo-postgres:5432/defectdojo
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+      DD_CELERY_RESULT_BACKEND: redis://defectdojo-redis:6379/0
+      DD_SECRET_KEY: defectdojo_secret_key_change_in_production
+      DD_TRACK_MIGRATIONS: "true"
+    depends_on:
+      defectdojo-postgres:
+        condition: service_healthy
+      defectdojo-redis:
+        condition: service_healthy
+
+  defectdojo-init:
+    image: defectdojo/defectdojo-django:2.30.4
+    platform: linux/amd64
+    container_name: defectdojo-init
+    entrypoint: ["/entrypoint-initializer.sh"]
+    command: ["python", "manage.py", "dd_init"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo_pass_2024@defectdojo-postgres:5432/defectdojo
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+      DD_CELERY_RESULT_BACKEND: redis://defectdojo-redis:6379/0
+      DD_SECRET_KEY: defectdojo_secret_key_change_in_production
+      DD_ADMIN_USER: admin
+      DD_ADMIN_PASSWORD: admin123
+      DD_INITIALIZE: "true"
+    depends_on:
+      defectdojo-migrate:
+        condition: service_completed_successfully
+
+  defectdojo-uwsgi:
+    image: defectdojo/defectdojo-django:2.30.4
+    platform: linux/amd64
+    container_name: defectdojo-uwsgi
+    entrypoint: ["python"]
+    command: ["manage.py", "runserver", "0.0.0.0:8081"]
+    working_dir: /app
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo_pass_2024@defectdojo-postgres:5432/defectdojo
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+      DD_CELERY_RESULT_BACKEND: redis://defectdojo-redis:6379/0
+      DD_SECRET_KEY: defectdojo_secret_key_change_in_production
+      DD_ALLOWED_HOSTS: "*"
+    ports:
+      - "8081:8081"
+    depends_on:
+      defectdojo-init:
+        condition: service_completed_successfully
+      defectdojo-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/login?next=/')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  defectdojo-celery-worker:
+    image: defectdojo/defectdojo-django:2.30.4
+    platform: linux/amd64
+    container_name: defectdojo-celery-worker
+    entrypoint: ["/entrypoint-celery-worker.sh"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo_pass_2024@defectdojo-postgres:5432/defectdojo
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+      DD_CELERY_RESULT_BACKEND: redis://defectdojo-redis:6379/0
+      DD_SECRET_KEY: defectdojo_secret_key_change_in_production
+    depends_on:
+      defectdojo-init:
+        condition: service_completed_successfully
+      defectdojo-redis:
+        condition: service_healthy
+
+  defectdojo-celery-beat:
+    image: defectdojo/defectdojo-django:2.30.4
+    platform: linux/amd64
+    container_name: defectdojo-celery-beat
+    entrypoint: ["/entrypoint-celery-beat.sh"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo_pass_2024@defectdojo-postgres:5432/defectdojo
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+      DD_CELERY_RESULT_BACKEND: redis://defectdojo-redis:6379/0
+      DD_SECRET_KEY: defectdojo_secret_key_change_in_production
+    depends_on:
+      defectdojo-init:
+        condition: service_completed_successfully
+      defectdojo-redis:
+        condition: service_healthy
+
+volumes:
+  defectdojo_postgres_data:
+  defectdojo_redis_data:

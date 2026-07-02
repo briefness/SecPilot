@@ -1,0 +1,519 @@
+# =============================================================================
+# SecOps 安全合规流水线模板 - GitHub Actions
+# =============================================================================
+# 版本: 1.0.0
+# 描述: 企业级四阶段安全合规流水线
+#   - 阶段A: 白天快扫 (OSV Scanner + SonarQube)
+#   - 阶段B: 夜间深扫 (ZAP + Playwright)
+#   - 阶段C: 发版审计 (MobSF + SHA256 Hash)
+#   - 阶段D: 应急巡检 (Nuclei)
+# =============================================================================
+
+name: Security Compliance Pipeline
+
+env:
+  SECURITY_PLATFORM_URL: "https://secops.example.com/api/v1"
+  DEFECTDOJO_URL: "https://defectdojo.example.com"
+  SCAN_OUTPUT_DIR: "security-reports"
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  schedule:
+    - cron: '0 2 * * *'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      run_night_scan:
+        description: '运行夜间深扫'
+        type: boolean
+        default: false
+      run_release_audit:
+        description: '运行发版审计'
+        type: boolean
+        default: false
+      run_emergency_patrol:
+        description: '运行应急巡检'
+        type: boolean
+        default: false
+      emergency_reason:
+        description: '应急巡检原因'
+        type: string
+        required: false
+      emergency_cve_id:
+        description: '特定 CVE ID'
+        type: string
+        required: false
+      target_url:
+        description: '扫描目标 URL'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+jobs:
+  # ===========================================================================
+  # 阶段0: 配置校验
+  # ===========================================================================
+  validate-config:
+    name: Validate Config
+    runs-on: ubuntu-latest
+    outputs:
+      has_product_id: ${{ steps.check.outputs.has_product_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Security Configuration
+        id: check
+        run: |
+          echo "::group::安全配置校验"
+          
+          if [ -z "${{ secrets.SECURITY_PRODUCT_ID }}" ]; then
+            echo "::error::SECURITY_PRODUCT_ID 未配置，请在 Repository Secrets 中设置"
+            echo "has_product_id=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "产品ID: ${{ secrets.SECURITY_PRODUCT_ID }}"
+          echo "提交哈希: ${{ github.sha }}"
+          echo "分支: ${{ github.ref_name }}"
+          echo "工作流ID: ${{ github.run_id }}"
+          
+          if [ -z "${{ secrets.SECURITY_API_TOKEN }}" ]; then
+            echo "::warning::SECURITY_API_TOKEN 未配置，结果上报将跳过"
+          fi
+          
+          if [ -z "${{ secrets.DEFECTDOJO_API_KEY }}" ]; then
+            echo "::warning::DEFECTDOJO_API_KEY 未配置，DefectDojo 上报将跳过"
+          fi
+          
+          echo "has_product_id=true" >> $GITHUB_OUTPUT
+          echo "配置校验通过"
+          echo "::endgroup::"
+
+  # ===========================================================================
+  # 阶段A: 白天快扫 - 提交/PR触发
+  # ===========================================================================
+  day-fast-scan:
+    name: Day Fast Scan
+    needs: validate-config
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [osv, sonarqube]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create output directory
+        run: mkdir -p ${{ env.SCAN_OUTPUT_DIR }}
+
+      - name: Check Bypass Token
+        run: |
+          if [ -n "${{ secrets.BYPASS_TOKEN }}" ] && [ "${{ secrets.BYPASS_TOKEN }}" = "${{ secrets.EMERGENCY_BYPASS_TOKEN }}" ]; then
+            echo "::warning::============================================================"
+            echo "::warning::检测到紧急逃生通道 BYPASS_TOKEN，安全扫描将被跳过"
+            echo "::warning::请确保已获得安全团队授权"
+            echo "::warning::============================================================"
+            exit 0
+          fi
+
+      - name: OSV Scanner (SCA)
+        if: matrix.scanner == 'osv'
+        uses: google/osv-scanner-action/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --recursive
+            --format=json
+            --output=${{ env.SCAN_OUTPUT_DIR }}/osv-results.json
+            ./
+        continue-on-error: true
+
+      - name: OSV Results Summary
+        if: matrix.scanner == 'osv'
+        run: |
+          if [ -f "${{ env.SCAN_OUTPUT_DIR }}/osv-results.json" ]; then
+            VULN_COUNT=$(grep -c '"id":' ${{ env.SCAN_OUTPUT_DIR }}/osv-results.json || echo 0)
+            echo "OSV 扫描完成，发现 $VULN_COUNT 个漏洞"
+            
+            CRITICAL_COUNT=$(grep -i '"severity": "CRITICAL"' ${{ env.SCAN_OUTPUT_DIR }}/osv-results.json | wc -l || echo 0)
+            HIGH_COUNT=$(grep -i '"severity": "HIGH"' ${{ env.SCAN_OUTPUT_DIR }}/osv-results.json | wc -l || echo 0)
+            
+            echo "严重漏洞: $CRITICAL_COUNT"
+            echo "高危漏洞: $HIGH_COUNT"
+            
+            if [ "$CRITICAL_COUNT" -gt 0 ] && [ "${{ secrets.FAIL_ON_CRITICAL }}" = "true" ]; then
+              echo "::error::存在严重漏洞，流水线失败"
+              exit 1
+            fi
+          fi
+
+      - name: SonarQube Scan (SAST)
+        if: matrix.scanner == 'sonarqube'
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ secrets.SECURITY_PRODUCT_ID }}
+            -Dsonar.sources=.
+        continue-on-error: true
+
+      - name: SonarQube Quality Gate
+        if: matrix.scanner == 'sonarqube'
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        continue-on-error: true
+        with:
+          timeoutMinutes: 5
+
+      - name: Upload Scan Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: day-fast-scan-${{ matrix.scanner }}-reports
+          path: ${{ env.SCAN_OUTPUT_DIR }}/
+          retention-days: 90
+
+  # ===========================================================================
+  # 阶段B: 夜间深扫 - Cron 凌晨2:00触发
+  # ===========================================================================
+  night-deep-scan:
+    name: Night Deep Scan
+    needs: validate-config
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'schedule') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_night_scan == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [zap, playwright]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p ${{ env.SCAN_OUTPUT_DIR }}/zap
+
+      - name: Set target URL
+        id: target
+        run: |
+          TARGET_URL="${{ secrets.SCAN_TARGET_URL }}"
+          if [ -n "${{ github.event.inputs.target_url }}" ]; then
+            TARGET_URL="${{ github.event.inputs.target_url }}"
+          fi
+          echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
+
+      - name: OWASP ZAP Scan (DAST)
+        if: matrix.scanner == 'zap'
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ steps.target.outputs.target_url }}
+          cmd_options: '-m 10 -T 60'
+          fail_action: false
+          allow_issue_writing: false
+        continue-on-error: true
+
+      - name: Move ZAP Reports
+        if: matrix.scanner == 'zap'
+        run: |
+          if [ -f "zap_report.html" ]; then
+            mv zap_report.html ${{ env.SCAN_OUTPUT_DIR }}/zap/zap-report.html
+          fi
+          if [ -f "zap_results.json" ]; then
+            mv zap_results.json ${{ env.SCAN_OUTPUT_DIR }}/zap/zap-results.json
+          fi
+
+      - name: Playwright Scan
+        if: matrix.scanner == 'playwright'
+        run: |
+          if [ -d "e2e" ] && [ -f "e2e/package.json" ]; then
+            cd e2e
+            npm ci
+            npx playwright install --with-deps
+            npx playwright test --reporter=json,html || true
+            cp playwright-report/index.html ../${{ env.SCAN_OUTPUT_DIR }}/playwright-report.html || true
+            cp test-results.json ../${{ env.SCAN_OUTPUT_DIR }}/playwright-results.json || true
+          else
+            echo "未找到 e2e 测试目录，跳过 Playwright 扫描"
+            echo '{"skipped": true, "reason": "no_e2e_tests"}' > ${{ env.SCAN_OUTPUT_DIR }}/playwright-results.json
+          fi
+
+      - name: Upload Scan Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: night-deep-scan-${{ matrix.scanner }}-reports
+          path: ${{ env.SCAN_OUTPUT_DIR }}/
+          retention-days: 90
+
+  # ===========================================================================
+  # 阶段C: 发版审计 - Release触发
+  # ===========================================================================
+  release-audit:
+    name: Release Audit
+    needs: validate-config
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_release_audit == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: [mobsf, sha256]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p ${{ env.SCAN_OUTPUT_DIR }}
+
+      - name: MobSF Scan
+        if: matrix.scanner == 'mobsf'
+        run: |
+          MOBILE_APP_PATH="${{ secrets.MOBILE_APP_PATH }}"
+          
+          if [ -z "$MOBILE_APP_PATH" ] || [ ! -f "$MOBILE_APP_PATH" ]; then
+            echo "未找到移动应用文件，跳过 MobSF 扫描"
+            echo '{"skipped": true, "reason": "no_mobile_app"}' > ${{ env.SCAN_OUTPUT_DIR }}/mobsf-results.json
+            exit 0
+          fi
+          
+          FILE_EXT="${MOBILE_APP_PATH##*.}"
+          
+          if [ "$FILE_EXT" = "apk" ] || [ "$FILE_EXT" = "ipa" ]; then
+            docker run -d --name mobsf -p 8000:8000 opensecurity/mobile-security-framework-mobsf:latest
+            sleep 10
+            
+            curl -s -X POST http://localhost:8000/api/v1/upload \
+              -H "Authorization: ${{ secrets.MOBSF_API_KEY }}" \
+              -F "file=@$MOBILE_APP_PATH" > ${{ env.SCAN_OUTPUT_DIR }}/mobsf-upload.json
+            
+            SCAN_TYPE="apk"
+            if [ "$FILE_EXT" = "ipa" ]; then
+              SCAN_TYPE="ipa"
+            fi
+            
+            curl -s -X POST http://localhost:8000/api/v1/scan \
+              -H "Authorization: ${{ secrets.MOBSF_API_KEY }}" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "file_name=$(basename $MOBILE_APP_PATH)&scan_type=$SCAN_TYPE" \
+              > ${{ env.SCAN_OUTPUT_DIR }}/mobsf-results.json
+            
+            curl -s -X POST http://localhost:8000/api/v1/report/pdf \
+              -H "Authorization: ${{ secrets.MOBSF_API_KEY }}" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "file_name=$(basename $MOBILE_APP_PATH)&scan_type=$SCAN_TYPE" \
+              -o ${{ env.SCAN_OUTPUT_DIR }}/mobsf-report.pdf
+            
+            docker stop mobsf
+            echo "MobSF 扫描完成"
+          else
+            echo "不支持的文件类型: $FILE_EXT"
+          fi
+        continue-on-error: true
+
+      - name: SHA256 Hash Verify
+        if: matrix.scanner == 'sha256'
+        run: |
+          echo "开始发版产物 SHA-256 哈希校验..."
+          
+          RELEASE_DIR="${{ secrets.RELEASE_ARTIFACT_DIR }}"
+          
+          if [ -n "$RELEASE_DIR" ] && [ -d "$RELEASE_DIR" ]; then
+            cd "$RELEASE_DIR"
+            find . -type f -exec sha256sum {} \; | sort > ../${{ env.SCAN_OUTPUT_DIR }}/SHA256SUMS
+            echo "SHA-256 哈希清单已生成:"
+            cat ../${{ env.SCAN_OUTPUT_DIR }}/SHA256SUMS
+            cd ..
+            
+            if [ -n "${{ secrets.EXPECTED_HASH_FILE }}" ] && [ -f "${{ secrets.EXPECTED_HASH_FILE }}" ]; then
+              echo "校验预期哈希..."
+              sha256sum -c "${{ secrets.EXPECTED_HASH_FILE }}" || {
+                echo "::error::哈希校验失败，发版产物可能被篡改"
+                exit 1
+              }
+              echo "哈希校验通过"
+            fi
+          else
+            echo "未指定发版产物目录，生成代码仓库快照哈希"
+            find . -type f -not -path './.git/*' -not -path './node_modules/*' -not -path "./${{ env.SCAN_OUTPUT_DIR }}/*" \
+              -exec sha256sum {} \; | sort > ${{ env.SCAN_OUTPUT_DIR }}/SHA256SUMS
+            echo "代码快照哈希已生成"
+          fi
+          
+          ARTIFACT_HASH=$(cat ${{ env.SCAN_OUTPUT_DIR }}/SHA256SUMS | sha256sum | awk '{print $1}')
+          echo "发版整体哈希: $ARTIFACT_HASH"
+          echo "$ARTIFACT_HASH  ${{ github.ref_name }}" > ${{ env.SCAN_OUTPUT_DIR }}/RELEASE_SHA256
+
+      - name: Upload Scan Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-audit-${{ matrix.scanner }}-reports
+          path: ${{ env.SCAN_OUTPUT_DIR }}/
+          retention-days: 90
+
+  # ===========================================================================
+  # 阶段D: 应急巡检 - 手动触发/重大0day
+  # ===========================================================================
+  emergency-patrol:
+    name: Emergency Patrol
+    needs: validate-config
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_emergency_patrol == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p ${{ env.SCAN_OUTPUT_DIR }}
+
+      - name: Set target URL
+        id: target
+        run: |
+          TARGET_URL="${{ secrets.SCAN_TARGET_URL }}"
+          if [ -n "${{ github.event.inputs.target_url }}" ]; then
+            TARGET_URL="${{ github.event.inputs.target_url }}"
+          fi
+          echo "target_url=$TARGET_URL" >> $GITHUB_OUTPUT
+
+      - name: Nuclei Scan
+        uses: projectdiscovery/nuclei-action@main
+        with:
+          target: ${{ steps.target.outputs.target_url }}
+          templates: 'cves,emerging-threats,vulnerabilities'
+          severity: 'critical,high,medium'
+          output: ${{ env.SCAN_OUTPUT_DIR }}/nuclei-results.json
+          json: true
+          markdown: ${{ env.SCAN_OUTPUT_DIR }}/nuclei-report.md
+          stats: true
+          timeout: '30s'
+        continue-on-error: true
+
+      - name: Specific CVE Check
+        if: github.event.inputs.emergency_cve_id != ''
+        run: |
+          echo "针对特定 CVE 检查: ${{ github.event.inputs.emergency_cve_id }}"
+          docker run projectdiscovery/nuclei:latest \
+            -u ${{ steps.target.outputs.target_url }} \
+            -t ${{ github.event.inputs.emergency_cve_id }} \
+            -json > ${{ env.SCAN_OUTPUT_DIR }}/nuclei-specific.json || true
+
+      - name: Emergency Patrol Summary
+        run: |
+          echo "::group::应急巡检结果汇总"
+          echo "触发原因: ${{ github.event.inputs.emergency_reason || 'manual_trigger' }}"
+          echo "目标: ${{ steps.target.outputs.target_url }}"
+          
+          if [ -f "${{ env.SCAN_OUTPUT_DIR }}/nuclei-results.json" ]; then
+            FINDING_COUNT=$(grep -c '"template"' ${{ env.SCAN_OUTPUT_DIR }}/nuclei-results.json || echo 0)
+            echo "发现漏洞数: $FINDING_COUNT"
+          else
+            echo "未发现漏洞"
+          fi
+          echo "::endgroup::"
+
+      - name: Upload Scan Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emergency-patrol-reports
+          path: ${{ env.SCAN_OUTPUT_DIR }}/
+          retention-days: 90
+
+  # ===========================================================================
+  # 结果上报到安全平台 (Mock)
+  # ===========================================================================
+  report-to-platform:
+    name: Report to SecOps Platform
+    runs-on: ubuntu-latest
+    needs: [day-fast-scan, night-deep-scan, release-audit, emergency-patrol]
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+
+      - name: Report to Security Platform
+        run: |
+          if [ -z "${{ secrets.SECURITY_API_TOKEN }}" ]; then
+            echo "SECURITY_API_TOKEN 未配置，跳过结果上报"
+            exit 0
+          fi
+          
+          SCAN_TYPES=""
+          
+          if find all-reports -name "osv-results.json" -quit; then
+            SCAN_TYPES="$SCAN_TYPES osv"
+          fi
+          
+          if find all-reports -name "zap-results.json" -quit; then
+            SCAN_TYPES="$SCAN_TYPES zap"
+          fi
+          
+          if find all-reports -name "nuclei-results.json" -quit; then
+            SCAN_TYPES="$SCAN_TYPES nuclei"
+          fi
+          
+          if find all-reports -name "mobsf-results.json" -quit; then
+            SCAN_TYPES="$SCAN_TYPES mobsf"
+          fi
+          
+          echo "待上报扫描类型: $SCAN_TYPES"
+          
+          curl -s -X POST "${{ env.SECURITY_PLATFORM_URL }}/scans/ingest" \
+            -H "Authorization: Bearer ${{ secrets.SECURITY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"productId\": \"${{ secrets.SECURITY_PRODUCT_ID }}\",
+              \"pipelineId\": \"${{ github.run_id }}\",
+              \"commitHash\": \"${{ github.sha }}\",
+              \"branch\": \"${{ github.ref_name }}\",
+              \"tag\": \"${{ github.ref_type == 'tag' && github.ref_name || '' }}\",
+              \"scanTypes\": \"$SCAN_TYPES\",
+              \"triggeredBy\": \"github-actions\",
+              \"reportPath\": \"all-reports/\"
+            }" || echo "上报失败，但不影响流水线"
+          
+          echo "结果上报完成"
+        continue-on-error: true
+
+# =============================================================================
+# GitHub Secrets 配置说明
+# =============================================================================
+# 必需变量:
+#   SECURITY_PRODUCT_ID   - 安全产品唯一标识
+#
+# 可选变量:
+#   SECURITY_API_TOKEN    - 安全平台 API Token
+#   DEFECTDOJO_API_KEY    - DefectDojo API Key
+#   SONAR_HOST_URL        - SonarQube 服务地址
+#   SONAR_TOKEN           - SonarQube Token
+#   SCAN_TARGET_URL       - 动态扫描目标 URL
+#   MOBSF_API_KEY         - MobSF API Key
+#   MOBILE_APP_PATH       - 移动应用文件路径
+#   RELEASE_ARTIFACT_DIR  - 发版产物目录
+#   EXPECTED_HASH_FILE    - 预期哈希文件路径
+#   BYPASS_TOKEN          - 紧急逃生通道 Token
+#   EMERGENCY_BYPASS_TOKEN- 紧急逃生通道密钥
+#   FAIL_ON_CRITICAL      - 发现严重漏洞时失败 (true/false)
+# =============================================================================

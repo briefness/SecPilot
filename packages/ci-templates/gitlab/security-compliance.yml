@@ -1,0 +1,474 @@
+# =============================================================================
+# SecOps 安全合规流水线模板 - GitLab CI
+# =============================================================================
+# 版本: 1.0.0
+# 描述: 企业级四阶段安全合规流水线
+#   - 阶段A: 白天快扫 (OSV Scanner + SonarQube)
+#   - 阶段B: 夜间深扫 (ZAP + Playwright)
+#   - 阶段C: 发版审计 (MobSF + SHA256 Hash)
+#   - 阶段D: 应急巡检 (Nuclei)
+# =============================================================================
+
+stages:
+  - validate
+  - day-fast-scan
+  - night-deep-scan
+  - release-audit
+  - emergency-patrol
+  - report
+
+# =============================================================================
+# 全局变量
+# =============================================================================
+variables:
+  SECURITY_PLATFORM_URL: "https://secops.example.com/api/v1"
+  DEFECTDOJO_URL: "https://defectdojo.example.com"
+  SCAN_OUTPUT_DIR: "security-reports"
+  GIT_DEPTH: "0"
+
+# =============================================================================
+# 通用脚本模板
+# =============================================================================
+.security_common:
+  before_script:
+    - |
+      if [ -z "$SECURITY_PRODUCT_ID" ]; then
+        echo "[ERROR] SECURITY_PRODUCT_ID 变量未配置，请在项目 CI/CD 变量中设置"
+        echo "[ERROR] 配置路径: Settings > CI/CD > Variables > SECURITY_PRODUCT_ID"
+        exit 1
+      fi
+      echo "[INFO] 安全产品ID: $SECURITY_PRODUCT_ID"
+      echo "[INFO] 提交哈希: $CI_COMMIT_SHA"
+      echo "[INFO] 分支: $CI_COMMIT_BRANCH"
+      echo "[INFO] 流水线ID: $CI_PIPELINE_ID"
+      mkdir -p $SCAN_OUTPUT_DIR
+    - |
+      if [ -n "$BYPASS_TOKEN" ] && [ "$BYPASS_TOKEN" = "$EMERGENCY_BYPASS_TOKEN" ]; then
+        echo "[WARN] ============================================================"
+        echo "[WARN] 检测到紧急逃生通道 BYPASS_TOKEN，安全扫描将被跳过"
+        echo "[WARN] 请确保已获得安全团队授权"
+        echo "[WARN] ============================================================"
+        exit 0
+      fi
+  after_script:
+    - echo "[INFO] 安全扫描阶段完成，结果目录: $SCAN_OUTPUT_DIR"
+  artifacts:
+    when: always
+    paths:
+      - $SCAN_OUTPUT_DIR/
+    expire_in: 90 days
+  allow_failure: false
+
+# =============================================================================
+# 阶段0: 配置校验
+# =============================================================================
+validate-config:
+  stage: validate
+  image: alpine:latest
+  script:
+    - |
+      echo "[INFO] 开始校验安全流水线配置..."
+      
+      if [ -z "$SECURITY_PRODUCT_ID" ]; then
+        echo "[ERROR] SECURITY_PRODUCT_ID 必须配置"
+        exit 1
+      fi
+      
+      if [ -z "$SECURITY_API_TOKEN" ]; then
+        echo "[WARN] SECURITY_API_TOKEN 未配置，结果上报将跳过"
+      fi
+      
+      if [ -z "$DEFECTDOJO_API_KEY" ]; then
+        echo "[WARN] DEFECTDOJO_API_KEY 未配置，DefectDojo 上报将跳过"
+      fi
+      
+      echo "[INFO] 配置校验通过"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# =============================================================================
+# 阶段A: 白天快扫 - 提交/PR触发
+# =============================================================================
+osv-scanner:
+  stage: day-fast-scan
+  extends: .security_common
+  image:
+    name: ghcr.io/google/osv-scanner:latest
+    entrypoint: [""]
+  script:
+    - |
+      echo "[INFO] 开始 OSV 漏洞扫描 (SCA - 软件成分分析)..."
+      
+      osv-scanner -r --format json ./ > $SCAN_OUTPUT_DIR/osv-results.json 2>&1 || true
+      
+      if [ -f "$SCAN_OUTPUT_DIR/osv-results.json" ]; then
+        VULN_COUNT=$(cat $SCAN_OUTPUT_DIR/osv-results.json | grep -c '"id":' || echo 0)
+        echo "[INFO] OSV 扫描完成，发现 $VULN_COUNT 个漏洞"
+      else
+        echo "[ERROR] OSV 扫描结果文件未生成"
+        exit 1
+      fi
+      
+      CRITICAL_COUNT=$(cat $SCAN_OUTPUT_DIR/osv-results.json | grep -i '"severity": "CRITICAL"' | wc -l || echo 0)
+      HIGH_COUNT=$(cat $SCAN_OUTPUT_DIR/osv-results.json | grep -i '"severity": "HIGH"' | wc -l || echo 0)
+      
+      echo "[INFO] 严重漏洞: $CRITICAL_COUNT"
+      echo "[INFO] 高危漏洞: $HIGH_COUNT"
+      
+      if [ "$CRITICAL_COUNT" -gt 0 ] && [ "$FAIL_ON_CRITICAL" = "true" ]; then
+        echo "[ERROR] 存在严重漏洞，流水线失败"
+        exit 1
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+
+sonarqube-scan:
+  stage: day-fast-scan
+  extends: .security_common
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - |
+      echo "[INFO] 开始 SonarQube 静态代码分析 (SAST)..."
+      
+      if [ -z "$SONAR_HOST_URL" ]; then
+        echo "[ERROR] SONAR_HOST_URL 未配置"
+        exit 1
+      fi
+      
+      sonar-scanner \
+        -Dsonar.projectKey=$SECURITY_PRODUCT_ID \
+        -Dsonar.sources=. \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.login=$SONAR_TOKEN \
+        -Dsonar.qualitygate.wait=true \
+        -Dsonar.qualitygate.timeout=300
+      
+      echo "[INFO] SonarQube 扫描完成"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - when: never
+
+# =============================================================================
+# 阶段B: 夜间深扫 - Cron 凌晨2:00触发
+# =============================================================================
+zap-scan:
+  stage: night-deep-scan
+  extends: .security_common
+  image:
+    name: owasp/zap2docker-stable:latest
+    entrypoint: [""]
+  script:
+    - |
+      echo "[INFO] 开始 OWASP ZAP 动态应用安全测试 (DAST)..."
+      
+      if [ -z "$SCAN_TARGET_URL" ]; then
+        echo "[ERROR] SCAN_TARGET_URL 未配置，无法进行动态扫描"
+        exit 1
+      fi
+      
+      mkdir -p $SCAN_OUTPUT_DIR/zap
+      
+      zap-baseline.py \
+        -t $SCAN_TARGET_URL \
+        -r $SCAN_OUTPUT_DIR/zap/zap-report.html \
+        -J $SCAN_OUTPUT_DIR/zap/zap-results.json \
+        -w $SCAN_OUTPUT_DIR/zap/zap-warnings.md \
+        -m 10 \
+        -T 60 || true
+      
+      echo "[INFO] ZAP 扫描完成"
+      
+      if [ -f "$SCAN_OUTPUT_DIR/zap/zap-results.json" ]; then
+        echo "[INFO] 扫描结果已保存到 zap-results.json"
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $NIGHT_SCAN == "true"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_NIGHT_SCAN == "true"'
+      when: on_success
+    - when: never
+
+playwright-scan:
+  stage: night-deep-scan
+  extends: .security_common
+  image: mcr.microsoft.com/playwright:v1.40.0-jammy
+  script:
+    - |
+      echo "[INFO] 开始 Playwright 安全扫描 (浏览器端测试)..."
+      
+      if [ -d "e2e" ]; then
+        cd e2e
+        if [ -f "package.json" ]; then
+          npm ci
+          npx playwright test --reporter=json,html
+          cp playwright-report/index.html ../$SCAN_OUTPUT_DIR/playwright-report.html || true
+          cp test-results.json ../$SCAN_OUTPUT_DIR/playwright-results.json || true
+        fi
+      else
+        echo "[INFO] 未找到 e2e 测试目录，跳过 Playwright 扫描"
+        echo "{\"skipped\": true, \"reason\": \"no_e2e_tests\"}" > $SCAN_OUTPUT_DIR/playwright-results.json
+      fi
+      
+      echo "[INFO] Playwright 扫描完成"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $NIGHT_SCAN == "true"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_NIGHT_SCAN == "true"'
+      when: on_success
+    - when: never
+
+# =============================================================================
+# 阶段C: 发版审计 - Tag/Release触发
+# =============================================================================
+mobsf-scan:
+  stage: release-audit
+  extends: .security_common
+  image:
+    name: opensecurity/mobile-security-framework-mobsf:latest
+    entrypoint: [""]
+  services:
+    - name: opensecurity/mobile-security-framework-mobsf:latest
+      alias: mobsf
+  script:
+    - |
+      echo "[INFO] 开始 MobSF 移动应用安全扫描..."
+      
+      if [ -z "$MOBILE_APP_PATH" ] || [ ! -f "$MOBILE_APP_PATH" ]; then
+        echo "[INFO] 未找到移动应用文件，跳过 MobSF 扫描"
+        echo "{\"skipped\": true, \"reason\": \"no_mobile_app\"}" > $SCAN_OUTPUT_DIR/mobsf-results.json
+        exit 0
+      fi
+      
+      FILE_EXT="${MOBILE_APP_PATH##*.}"
+      
+      if [ "$FILE_EXT" = "apk" ] || [ "$FILE_EXT" = "ipa" ]; then
+        curl -s -X POST $MOBSF_URL/api/v1/upload \
+          -H "Authorization: $MOBSF_API_KEY" \
+          -F "file=@$MOBILE_APP_PATH" > $SCAN_OUTPUT_DIR/mobsf-upload.json
+        
+        SCAN_TYPE="apk"
+        if [ "$FILE_EXT" = "ipa" ]; then
+          SCAN_TYPE="ipa"
+        fi
+        
+        curl -s -X POST $MOBSF_URL/api/v1/scan \
+          -H "Authorization: $MOBSF_API_KEY" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "file_name=$(basename $MOBILE_APP_PATH)&scan_type=$SCAN_TYPE" \
+          > $SCAN_OUTPUT_DIR/mobsf-results.json
+        
+        curl -s -X POST $MOBSF_URL/api/v1/report/pdf \
+          -H "Authorization: $MOBSF_API_KEY" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "file_name=$(basename $MOBILE_APP_PATH)&scan_type=$SCAN_TYPE" \
+          -o $SCAN_OUTPUT_DIR/mobsf-report.pdf
+        
+        echo "[INFO] MobSF 扫描完成"
+      else
+        echo "[WARN] 不支持的文件类型: $FILE_EXT"
+      fi
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_RELEASE_AUDIT == "true"'
+      when: on_success
+    - when: never
+
+sha256-verify:
+  stage: release-audit
+  extends: .security_common
+  image: alpine:latest
+  script:
+    - |
+      echo "[INFO] 开始发版产物 SHA-256 哈希校验..."
+      
+      apk add --no-cache coreutils
+      
+      if [ -n "$RELEASE_ARTIFACT_DIR" ] && [ -d "$RELEASE_ARTIFACT_DIR" ]; then
+        cd "$RELEASE_ARTIFACT_DIR"
+        
+        find . -type f -exec sha256sum {} \; | sort > ../$SCAN_OUTPUT_DIR/SHA256SUMS
+        
+        echo "[INFO] SHA-256 哈希清单已生成:"
+        cat ../$SCAN_OUTPUT_DIR/SHA256SUMS
+        cd ..
+        
+        if [ -f "$EXPECTED_HASH_FILE" ]; then
+          echo "[INFO] 校验预期哈希..."
+          sha256sum -c "$EXPECTED_HASH_FILE" || {
+            echo "[ERROR] 哈希校验失败，发版产物可能被篡改"
+            exit 1
+          }
+          echo "[INFO] 哈希校验通过"
+        fi
+      else
+        echo "[INFO] 未指定发版产物目录，生成代码仓库快照哈希"
+        find . -type f -not -path './.git/*' -not -path './node_modules/*' -not -path "./$SCAN_OUTPUT_DIR/*" \
+          -exec sha256sum {} \; | sort > $SCAN_OUTPUT_DIR/SHA256SUMS
+        echo "[INFO] 代码快照哈希已生成"
+      fi
+      
+      ARTIFACT_HASH=$(cat $SCAN_OUTPUT_DIR/SHA256SUMS | sha256sum | awk '{print $1}')
+      echo "[INFO] 发版整体哈希: $ARTIFACT_HASH"
+      echo "$ARTIFACT_HASH  $CI_COMMIT_TAG" > $SCAN_OUTPUT_DIR/RELEASE_SHA256
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_RELEASE_AUDIT == "true"'
+      when: on_success
+    - when: never
+
+# =============================================================================
+# 阶段D: 应急巡检 - 手动触发/重大0day
+# =============================================================================
+nuclei-scan:
+  stage: emergency-patrol
+  extends: .security_common
+  image:
+    name: projectdiscovery/nuclei:latest
+    entrypoint: [""]
+  script:
+    - |
+      echo "[INFO] 开始 Nuclei 应急漏洞巡检..."
+      
+      if [ -z "$SCAN_TARGET_URL" ]; then
+        echo "[ERROR] SCAN_TARGET_URL 未配置，无法进行应急巡检"
+        exit 1
+      fi
+      
+      echo "[INFO] 目标: $SCAN_TARGET_URL"
+      echo "[INFO] 触发原因: ${EMERGENCY_REASON:-manual_trigger}"
+      
+      NUCLEI_TEMPLATES="${NUCLEI_TEMPLATES:-cves,emerging-threats,vulnerabilities}"
+      
+      nuclei \
+        -u $SCAN_TARGET_URL \
+        -t $NUCLEI_TEMPLATES \
+        -severity critical,high,medium \
+        -json $SCAN_OUTPUT_DIR/nuclei-results.json \
+        -markdown $SCAN_OUTPUT_DIR/nuclei-report.md \
+        -stats \
+        -timeout 30s || true
+      
+      if [ -f "$SCAN_OUTPUT_DIR/nuclei-results.json" ]; then
+        FINDING_COUNT=$(grep -c '"template"' $SCAN_OUTPUT_DIR/nuclei-results.json || echo 0)
+        echo "[INFO] Nuclei 巡检完成，发现 $FINDING_COUNT 个漏洞"
+      else
+        echo "[INFO] 未发现漏洞"
+        echo "[]" > $SCAN_OUTPUT_DIR/nuclei-results.json
+      fi
+      
+      if [ -n "$EMERGENCY_CVE_ID" ]; then
+        echo "[INFO] 针对特定 CVE 检查: $EMERGENCY_CVE_ID"
+        nuclei -u $SCAN_TARGET_URL -t $EMERGENCY_CVE_ID -json $SCAN_OUTPUT_DIR/nuclei-specific.json || true
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RUN_EMERGENCY_PATROL == "true"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "manual" && $RUN_EMERGENCY_PATROL == "true"'
+      when: on_success
+    - when: never
+
+# =============================================================================
+# 阶段: 结果上报到 DefectDojo (Mock)
+# =============================================================================
+report-to-defectdojo:
+  stage: report
+  image: curlimages/curl:latest
+  script:
+    - |
+      echo "[INFO] 开始上报扫描结果到安全平台..."
+      
+      if [ -z "$SECURITY_API_TOKEN" ]; then
+        echo "[WARN] SECURITY_API_TOKEN 未配置，跳过结果上报"
+        exit 0
+      fi
+      
+      SCAN_TYPES=""
+      
+      if [ -f "$SCAN_OUTPUT_DIR/osv-results.json" ]; then
+        SCAN_TYPES="$SCAN_TYPES osv"
+      fi
+      
+      if [ -f "$SCAN_OUTPUT_DIR/zap/zap-results.json" ]; then
+        SCAN_TYPES="$SCAN_TYPES zap"
+      fi
+      
+      if [ -f "$SCAN_OUTPUT_DIR/nuclei-results.json" ]; then
+        SCAN_TYPES="$SCAN_TYPES nuclei"
+      fi
+      
+      if [ -f "$SCAN_OUTPUT_DIR/mobsf-results.json" ]; then
+        SCAN_TYPES="$SCAN_TYPES mobsf"
+      fi
+      
+      echo "[INFO] 待上报扫描类型: $SCAN_TYPES"
+      
+      curl -s -X POST "$SECURITY_PLATFORM_URL/scans/ingest" \
+        -H "Authorization: Bearer $SECURITY_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"productId\": \"$SECURITY_PRODUCT_ID\",
+          \"pipelineId\": \"$CI_PIPELINE_ID\",
+          \"commitHash\": \"$CI_COMMIT_SHA\",
+          \"branch\": \"$CI_COMMIT_BRANCH\",
+          \"tag\": \"$CI_COMMIT_TAG\",
+          \"scanTypes\": \"$SCAN_TYPES\",
+          \"triggeredBy\": \"gitlab-ci\",
+          \"reportPath\": \"$SCAN_OUTPUT_DIR/\"
+        }" || echo "[ERROR] 上报失败，但不影响流水线"
+      
+      echo "[INFO] 结果上报完成"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $NIGHT_SCAN == "true"'
+      when: always
+    - if: '$CI_COMMIT_TAG'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: always
+  allow_failure: true
+
+# =============================================================================
+# Cron 调度配置说明
+# =============================================================================
+# 夜间深扫调度:
+#   时间: 每天 02:00
+#   Cron: 0 2 * * *
+#   变量: NIGHT_SCAN=true
+#
+# 变量配置说明:
+#   SECURITY_PRODUCT_ID  - 安全产品唯一标识 (必填)
+#   SECURITY_API_TOKEN   - 安全平台 API Token
+#   DEFECTDOJO_API_KEY   - DefectDojo API Key
+#   SONAR_HOST_URL       - SonarQube 服务地址
+#   SONAR_TOKEN          - SonarQube Token
+#   SCAN_TARGET_URL      - 动态扫描目标 URL
+#   MOBSF_URL            - MobSF 服务地址
+#   MOBSF_API_KEY        - MobSF API Key
+#   MOBILE_APP_PATH      - 移动应用文件路径
+#   RELEASE_ARTIFACT_DIR - 发版产物目录
+#   BYPASS_TOKEN         - 紧急逃生通道 Token
+#   FAIL_ON_CRITICAL     - 发现严重漏洞时失败 (true/false)
+# =============================================================================

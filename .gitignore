@@ -1,0 +1,119 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build output
+dist
+build
+.next
+.turbo
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+
+# API keys & credentials
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.pub
+*.jks
+*.keystore
+*.secret
+secrets/
+credentials/
+vault_password
+.htpasswd
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.bak
+pgdata/
+mysql-data/
+mongodb-data/
+
+# Docker volumes & overrides
+docker-compose.override.yml
+docker-compose.local.yml
+volumes/
+data/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage
+.nyc_output
+playwright-report/
+test-results/
+
+# Cache
+.cache
+.parcel-cache
+.eslintcache
+.temp
+tmp/
+temp/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Prisma
+prisma/migrations/*_migration_lock.toml
+*.db-journal
+
+# DefectDojo local data
+dojo-data/
+dojo-postgres/
+
+# Local config overrides
+config.local.*
+override.*
+local.*
+
+# Security scan results (sensitive)
+scan-results/
+findings/
+reports/
+sarif/
+*.sarif
+
+# Terraform / IaC state
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
+# Ansible vault
+*.vault
+vault_pass
+
+# Personal / memory
+.memory/
+.personal/
+notes/
+draft/

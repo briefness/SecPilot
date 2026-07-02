@@ -1,0 +1,32 @@
+{
+  "name": "@secops/ci-templates",
+  "version": "1.0.0",
+  "description": "企业级安全合规 CI/CD 流水线模板集合，支持 GitLab CI 和 GitHub Actions",
+  "private": false,
+  "license": "MIT",
+  "main": "README.md",
+  "files": [
+    "gitlab/",
+    "github-actions/",
+    "scripts/",
+    "README.md"
+  ],
+  "keywords": [
+    "secops",
+    "security",
+    "compliance",
+    "ci-cd",
+    "gitlab",
+    "github-actions",
+    "devsecops"
+  ],
+  "author": "SecOps Platform Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/secops-platform/ci-templates.git"
+  },
+  "scripts": {
+    "lint:yaml": "yamllint gitlab/ github-actions/",
+    "lint:shell": "shellcheck scripts/*.sh"
+  }
+}
