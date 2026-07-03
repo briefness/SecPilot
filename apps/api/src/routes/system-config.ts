@@ -120,30 +120,24 @@ const systemConfigRoutes: FastifyPluginAsync = async (fastify) => {
     return config;
   });
 
-  fastify.put('/api/configs/:key', async (request) => {
+  fastify.put('/api/configs/:key', async (request, reply) => {
     const { key } = request.params as { key: string };
     const body = updateConfigSchema.parse(request.body);
 
-    const existing = await prisma.systemConfig.findUnique({ where: { key } });
+    await ensureDefaultConfigs();
 
-    let config;
-    if (existing) {
-      config = await prisma.systemConfig.update({
-        where: { key },
-        data: {
-          value: body.value as any,
-          updatedBy: request.user.userId,
-        },
-      });
-    } else {
-      config = await prisma.systemConfig.create({
-        data: {
-          key,
-          value: body.value as any,
-          updatedBy: request.user.userId,
-        },
-      });
+    const existing = await prisma.systemConfig.findUnique({ where: { key } });
+    if (!existing) {
+      return reply.status(404).send({ error: 'Config key not found' });
     }
+
+    const config = await prisma.systemConfig.update({
+      where: { key },
+      data: {
+        value: body.value as any,
+        updatedBy: request.user.userId,
+      },
+    });
 
     await prisma.auditLog.create({
       data: {

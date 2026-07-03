@@ -2,7 +2,7 @@ import { BaseScanner, ScannerResult, ScannerOptions, ScannerFinding } from './ba
 import { config } from '../config.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runDocker } from '../utils/docker.js';
@@ -168,6 +168,16 @@ export class NucleiScanner extends BaseScanner {
     try {
       const lines = output.trim().split('\n').filter(Boolean);
       return lines.map(line => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  }
+
+  private async parseJsonOutput(filePath: string): Promise<NucleiResult[]> {
+    try {
+      const fs = await import('node:fs/promises');
+      const content = await fs.readFile(filePath, 'utf-8');
+      return this.parseJsonLines(content);
     } catch {
       return [];
     }

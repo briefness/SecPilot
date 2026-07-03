@@ -53,17 +53,6 @@ async function getDDSeverityDistribution(
   return { distribution, total };
 }
 
-function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
-  const latestMap = new Map<string, T>();
-  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  for (const f of sorted) {
-    if (!latestMap.has(f.dedupHash)) {
-      latestMap.set(f.dedupHash, f);
-    }
-  }
-  return Array.from(latestMap.values());
-}
-
 async function getLocalSeverityStats(projectId?: string): Promise<{ distribution: Record<Severity, number>; total: number }> {
   const distribution: Record<Severity, number> = {
     [Severity.CRITICAL]: 0,
@@ -73,20 +62,37 @@ async function getLocalSeverityStats(projectId?: string): Promise<{ distribution
     [Severity.INFO]: 0,
   };
 
-  const where: Record<string, unknown> = { falsePositive: false };
-  if (projectId) where.projectId = projectId;
-
-  const allFindings = await prisma.finding.findMany({
-    where,
-    select: { id: true, dedupHash: true, createdAt: true, severity: true },
-  });
-
-  const deduped = dedupeFindingsLatest(allFindings);
+  const result = await prisma.$queryRawUnsafe<{ severity: string; count: bigint }[]>(
+    projectId
+      ? `
+        SELECT severity, COUNT(*)::bigint as count
+        FROM (
+          SELECT DISTINCT ON ("dedupHash") severity
+          FROM "Finding"
+          WHERE "falsePositive" = false AND "projectId" = $1
+          ORDER BY "dedupHash", "createdAt" DESC
+        ) latest
+        GROUP BY severity
+      `
+      : `
+        SELECT severity, COUNT(*)::bigint as count
+        FROM (
+          SELECT DISTINCT ON ("dedupHash") severity
+          FROM "Finding"
+          WHERE "falsePositive" = false
+          ORDER BY "dedupHash", "createdAt" DESC
+        ) latest
+        GROUP BY severity
+      `,
+    ...(projectId ? [projectId] : [])
+  );
 
   let total = 0;
-  for (const f of deduped) {
-    distribution[f.severity]++;
-    total++;
+  for (const row of result) {
+    const sev = row.severity as Severity;
+    const cnt = Number(row.count);
+    distribution[sev] = cnt;
+    total += cnt;
   }
 
   return { distribution, total };
@@ -180,23 +186,24 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
             return withCounts.sort((a, b) => b.count - a.count).slice(0, 10);
           })
         : (async () => {
-            const allFindings = await prisma.finding.findMany({
-              where: { falsePositive: false },
-              select: { id: true, dedupHash: true, createdAt: true, projectId: true, project: { select: { name: true } } },
-            });
-            const deduped = dedupeFindingsLatest(allFindings);
-            const projectCounts = new Map<string, { projectId: string; projectName: string; count: number }>();
-            for (const f of deduped) {
-              const existing = projectCounts.get(f.projectId);
-              if (existing) {
-                existing.count++;
-              } else {
-                projectCounts.set(f.projectId, { projectId: f.projectId, projectName: f.project.name, count: 1 });
-              }
-            }
-            return Array.from(projectCounts.values())
-              .sort((a, b) => b.count - a.count)
-              .slice(0, 10);
+            const result = await prisma.$queryRawUnsafe<{ projectId: string; projectName: string; count: bigint }[]>(`
+              SELECT p.id as "projectId", p.name as "projectName", COUNT(*)::bigint as count
+              FROM (
+                SELECT DISTINCT ON ("dedupHash") "projectId"
+                FROM "Finding"
+                WHERE "falsePositive" = false
+                ORDER BY "dedupHash", "createdAt" DESC
+              ) latest
+              JOIN "Project" p ON p.id = latest."projectId"
+              GROUP BY p.id, p.name
+              ORDER BY count DESC
+              LIMIT 10
+            `);
+            return result.map((r) => ({
+              projectId: r.projectId,
+              projectName: r.projectName,
+              count: Number(r.count),
+            }));
           })(),
     ]);
 
@@ -219,17 +226,21 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       const last30Days = new Date();
       last30Days.setDate(last30Days.getDate() - 30);
 
-      const allFindings = await prisma.finding.findMany({
-        where: { falsePositive: false, createdAt: { gte: last30Days } },
-        select: { id: true, dedupHash: true, createdAt: true },
-      });
-
-      const deduped = dedupeFindingsLatest(allFindings);
+      const result = await prisma.$queryRawUnsafe<{ date: string; count: bigint }[]>(`
+        SELECT DATE("createdAt")::text as date, COUNT(*)::bigint as count
+        FROM (
+          SELECT DISTINCT ON ("dedupHash") "createdAt"
+          FROM "Finding"
+          WHERE "falsePositive" = false AND "createdAt" >= $1
+          ORDER BY "dedupHash", "createdAt" DESC
+        ) latest
+        GROUP BY DATE("createdAt")
+        ORDER BY date ASC
+      `, last30Days.toISOString());
 
       const dailyCounts = new Map<string, number>();
-      for (const f of deduped) {
-        const dateStr = f.createdAt.toISOString().split('T')[0];
-        dailyCounts.set(dateStr, (dailyCounts.get(dateStr) || 0) + 1);
+      for (const row of result) {
+        dailyCounts.set(row.date, Number(row.count));
       }
 
       const today = new Date();
@@ -328,16 +339,24 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      const allFindings = await prisma.finding.findMany({
-        where: { falsePositive: false, createdAt: { gte: startDate } },
-        select: { id: true, dedupHash: true, createdAt: true, severity: true },
-      });
-
-      const deduped = dedupeFindingsLatest(allFindings);
+      const result = await prisma.$queryRawUnsafe<{ date: string; severity: string; count: bigint }[]>(`
+        SELECT
+          DATE("createdAt")::text as date,
+          severity,
+          COUNT(*)::bigint as count
+        FROM (
+          SELECT DISTINCT ON ("dedupHash") "createdAt", severity
+          FROM "Finding"
+          WHERE "falsePositive" = false AND "createdAt" >= $1
+          ORDER BY "dedupHash", "createdAt" DESC
+        ) latest
+        GROUP BY DATE("createdAt"), severity
+        ORDER BY date ASC
+      `, startDate.toISOString());
 
       const dailyData: Record<string, Record<string, number>> = {};
-      for (const f of deduped) {
-        const dateStr = f.createdAt.toISOString().split('T')[0];
+      for (const row of result) {
+        const dateStr = row.date;
         if (!dailyData[dateStr]) {
           dailyData[dateStr] = {
             [Severity.CRITICAL]: 0,
@@ -347,7 +366,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
             [Severity.INFO]: 0,
           };
         }
-        dailyData[dateStr][f.severity]++;
+        dailyData[dateStr][row.severity] = Number(row.count);
       }
 
       return {
@@ -442,37 +461,15 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    const where: Record<string, unknown> = { falsePositive: false };
-    if (query.projectId) where.projectId = query.projectId;
-
-    const allFindings = await prisma.finding.findMany({
-      where,
-      select: { id: true, dedupHash: true, createdAt: true, severity: true },
-    });
-
-    const deduped = dedupeFindingsLatest(allFindings);
-
-    const distribution: Record<Severity, number> = {
-      [Severity.CRITICAL]: 0,
-      [Severity.HIGH]: 0,
-      [Severity.MEDIUM]: 0,
-      [Severity.LOW]: 0,
-      [Severity.INFO]: 0,
-    };
-
-    for (const f of deduped) {
-      distribution[f.severity]++;
-    }
-
-    const total = deduped.length;
+    const local = await getLocalSeverityStats(query.projectId);
 
     return {
-      distribution,
-      total,
+      distribution: local.distribution,
+      total: local.total,
       percentages: Object.fromEntries(
-        Object.entries(distribution).map(([key, value]) => [
+        Object.entries(local.distribution).map(([key, value]) => [
           key,
-          total > 0 ? Number(((value / total) * 100).toFixed(1)) : 0,
+          local.total > 0 ? Number(((value / local.total) * 100).toFixed(1)) : 0,
         ])
       ),
     };
@@ -556,14 +553,23 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
         };
       });
     } else {
-      const allFindings = await prisma.finding.findMany({
-        where: { falsePositive: false },
-        orderBy: { createdAt: 'desc' },
-        include: {
-          project: { select: { id: true, name: true } },
-        },
-      });
-      recentFindings = dedupeFindingsLatest(allFindings).slice(0, 10);
+      const recent = await prisma.$queryRawUnsafe<any[]>(`
+        SELECT DISTINCT ON (f."dedupHash")
+          f.id, f.title, f.severity, f."createdAt", f."projectId",
+          p.name as "projectName"
+        FROM "Finding" f
+        JOIN "Project" p ON p.id = f."projectId"
+        WHERE f."falsePositive" = false
+        ORDER BY f."dedupHash", f."createdAt" DESC
+        LIMIT 10
+      `);
+      recentFindings = recent.map((r) => ({
+        id: r.id,
+        title: r.title,
+        severity: r.severity,
+        project: { id: r.projectId, name: r.projectName },
+        createdAt: r.createdAt,
+      }));
     }
 
     return {

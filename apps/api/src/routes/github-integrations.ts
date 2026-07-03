@@ -1,9 +1,10 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual as crypto_timingSafeEqual } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
 import { UserRole } from '@prisma/client';
 import { GithubOrgClient } from '../lib/github-org.js';
+import { encryptIfNeeded, decryptIfNeeded } from '../lib/encryption.js';
 
 const createIntegrationSchema = z.object({
   projectId: z.string(),
@@ -26,6 +27,27 @@ const updateIntegrationSchema = z.object({
   syncStatus: z.string().nullable().optional(),
 });
 
+function maskGithubSensitive<T extends { webhookSecret: string | null; personalAccessToken: string | null; securityBypassToken: string | null }>(i: T): T {
+  return {
+    ...i,
+    webhookSecret: i.webhookSecret ? '********' : null as any,
+    personalAccessToken: i.personalAccessToken ? '********' : null as any,
+    securityBypassToken: i.securityBypassToken ? '********' : null as any,
+  };
+}
+
+function maskOrgSensitive<T extends { privateKey: string | null; personalAccessToken: string | null }>(i: T): T {
+  return {
+    ...i,
+    privateKey: i.privateKey ? '********' : null as any,
+    personalAccessToken: i.personalAccessToken ? '********' : null as any,
+  };
+}
+
+function decryptOrgToken(token: string | null | undefined): string | null {
+  return decryptIfNeeded(token) ?? token ?? null;
+}
+
 function generateToken(): string {
   return randomBytes(32).toString('hex');
 }
@@ -37,8 +59,6 @@ function verifyGithubSignature(payload: string, signature: string, secret: strin
   if (expectedBuf.length !== actualBuf.length) return false;
   return crypto_timingSafeEqual(expectedBuf, actualBuf);
 }
-
-import { timingSafeEqual as crypto_timingSafeEqual } from 'node:crypto';
 
 const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/api/github-integrations', async (request) => {
@@ -59,10 +79,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return integrations.map((i) => ({
-      ...i,
-      personalAccessToken: i.personalAccessToken ? '********' : null,
-    }));
+    return integrations.map(maskGithubSensitive);
   });
 
   fastify.get('/api/github-integrations/:projectId', async (request, reply) => {
@@ -81,10 +98,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'GitHub integration not found' });
     }
 
-    return {
-      ...integration,
-      personalAccessToken: integration.personalAccessToken ? '********' : null,
-    };
+    return maskGithubSensitive(integration);
   });
 
   fastify.post('/api/github-integrations', async (request, reply) => {
@@ -99,7 +113,12 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const integration = await prisma.githubIntegration.create({
-      data: body,
+      data: {
+        ...body,
+        webhookSecret: encryptIfNeeded(body.webhookSecret) ?? body.webhookSecret,
+        personalAccessToken: encryptIfNeeded(body.personalAccessToken),
+        securityBypassToken: encryptIfNeeded(body.securityBypassToken),
+      },
       include: {
         project: { select: { id: true, name: true, productId: true } },
       },
@@ -119,10 +138,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return reply.status(201).send({
-      ...integration,
-      personalAccessToken: integration.personalAccessToken ? '********' : null,
-    });
+    return reply.status(201).send(maskGithubSensitive(integration));
   });
 
   fastify.patch('/api/github-integrations/:projectId', async (request, reply) => {
@@ -134,9 +150,14 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'GitHub integration not found' });
     }
 
+    const updateData: any = { ...body };
+    if (body.webhookSecret !== undefined) updateData.webhookSecret = encryptIfNeeded(body.webhookSecret);
+    if (body.personalAccessToken !== undefined) updateData.personalAccessToken = encryptIfNeeded(body.personalAccessToken);
+    if (body.securityBypassToken !== undefined) updateData.securityBypassToken = encryptIfNeeded(body.securityBypassToken);
+
     const updated = await prisma.githubIntegration.update({
       where: { projectId },
-      data: body,
+      data: updateData,
       include: {
         project: { select: { id: true, name: true, productId: true } },
       },
@@ -151,10 +172,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return {
-      ...updated,
-      personalAccessToken: updated.personalAccessToken ? '********' : null,
-    };
+    return maskGithubSensitive(updated);
   });
 
   fastify.delete('/api/github-integrations/:projectId', async (request, reply) => {
@@ -193,9 +211,9 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
 
     const newSecret = generateToken();
 
-    const updated = await prisma.githubIntegration.update({
+    await prisma.githubIntegration.update({
       where: { projectId },
-      data: { webhookSecret: newSecret },
+      data: { webhookSecret: encryptIfNeeded(newSecret) ?? newSecret },
     });
 
     await prisma.auditLog.create({
@@ -207,7 +225,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return { webhookSecret: updated.webhookSecret };
+    return { webhookSecret: newSecret };
   });
 
   fastify.post('/api/github-integrations/:projectId/rotate-bypass-token', async (request, reply) => {
@@ -224,9 +242,9 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
 
     const newToken = generateToken();
 
-    const updated = await prisma.githubIntegration.update({
+    await prisma.githubIntegration.update({
       where: { projectId },
-      data: { securityBypassToken: newToken },
+      data: { securityBypassToken: encryptIfNeeded(newToken) },
     });
 
     await prisma.auditLog.create({
@@ -238,7 +256,7 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return { securityBypassToken: updated.securityBypassToken };
+    return { securityBypassToken: newToken };
   });
 
   fastify.post('/api/github-integrations/webhook', async (request, reply) => {
@@ -292,7 +310,12 @@ const githubIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'No matching integration' });
     }
 
-    const valid = verifyGithubSignature(rawBody, signature, integration.webhookSecret);
+    const decryptedSecret = decryptIfNeeded(integration.webhookSecret) ?? integration.webhookSecret;
+    if (!decryptedSecret) {
+      return reply.status(403).send({ error: 'Invalid signature' });
+    }
+
+    const valid = verifyGithubSignature(rawBody, signature, decryptedSecret);
     if (!valid) {
       return reply.status(403).send({ error: 'Invalid signature' });
     }
@@ -395,16 +418,12 @@ jobs:
     return { template };
   });
 
-  fastify.get('/api/github-org-integrations', async (request) => {
+  fastify.get('/api/github-org-integrations', async () => {
     const integrations = await prisma.githubOrgIntegration.findMany({
       orderBy: { createdAt: 'desc' },
     });
 
-    return integrations.map((i) => ({
-      ...i,
-      personalAccessToken: i.personalAccessToken ? '********' : null,
-      privateKey: i.privateKey ? '********' : null,
-    }));
+    return integrations.map(maskOrgSensitive);
   });
 
   fastify.post('/api/github-org-integrations', async (request, reply) => {
@@ -433,7 +452,13 @@ jobs:
       return reply.status(409).send({ error: 'Org integration already exists' });
     }
 
-    const integration = await prisma.githubOrgIntegration.create({ data: body });
+    const integration = await prisma.githubOrgIntegration.create({
+      data: {
+        ...body,
+        privateKey: encryptIfNeeded(body.privateKey),
+        personalAccessToken: encryptIfNeeded(body.personalAccessToken),
+      },
+    });
 
     await prisma.auditLog.create({
       data: {
@@ -443,11 +468,7 @@ jobs:
       },
     });
 
-    return reply.status(201).send({
-      ...integration,
-      personalAccessToken: integration.personalAccessToken ? '********' : null,
-      privateKey: integration.privateKey ? '********' : null,
-    });
+    return reply.status(201).send(maskOrgSensitive(integration));
   });
 
   fastify.patch('/api/github-org-integrations/:id', async (request, reply) => {
@@ -473,9 +494,13 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
+    const updateData: any = { ...body };
+    if (body.privateKey !== undefined) updateData.privateKey = encryptIfNeeded(body.privateKey);
+    if (body.personalAccessToken !== undefined) updateData.personalAccessToken = encryptIfNeeded(body.personalAccessToken);
+
     const updated = await prisma.githubOrgIntegration.update({
       where: { id },
-      data: body,
+      data: updateData,
     });
 
     await prisma.auditLog.create({
@@ -486,11 +511,7 @@ jobs:
       },
     });
 
-    return {
-      ...updated,
-      personalAccessToken: updated.personalAccessToken ? '********' : null,
-      privateKey: updated.privateKey ? '********' : null,
-    };
+    return maskOrgSensitive(updated);
   });
 
   fastify.delete('/api/github-org-integrations/:id', async (request, reply) => {
@@ -524,7 +545,7 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
-    const token = integration.personalAccessToken;
+    const token = decryptOrgToken(integration.personalAccessToken);
     if (!token) {
       return reply.status(400).send({ error: 'No access token configured' });
     }
@@ -548,7 +569,7 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
-    const token = integration.personalAccessToken;
+    const token = decryptOrgToken(integration.personalAccessToken);
     if (!token) {
       return reply.status(400).send({ error: 'No access token configured' });
     }
@@ -575,7 +596,7 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
-    const token = integration.personalAccessToken;
+    const token = decryptOrgToken(integration.personalAccessToken);
     if (!token) {
       return reply.status(400).send({ error: 'No access token configured' });
     }
@@ -713,7 +734,7 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
-    const token = integration.personalAccessToken;
+    const token = decryptOrgToken(integration.personalAccessToken);
     if (!token) {
       return reply.status(400).send({ error: 'No access token configured' });
     }
@@ -751,7 +772,7 @@ jobs:
       return reply.status(404).send({ error: 'Org integration not found' });
     }
 
-    const token = integration.personalAccessToken;
+    const token = decryptOrgToken(integration.personalAccessToken);
     if (!token) {
       return reply.status(400).send({ error: 'No access token configured' });
     }

@@ -4,6 +4,19 @@ import { randomBytes } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
 import { UserRole } from '@prisma/client';
 import { GitlabGroupClient } from '../lib/gitlab-group.js';
+import { encryptIfNeeded, decryptIfNeeded, secureCompare, hashToken, verifyToken } from '../lib/encryption.js';
+
+function maskSensitive<T extends { webhookToken: string | null; securityBypassToken: string | null }>(i: T): T {
+  return {
+    ...i,
+    webhookToken: i.webhookToken ? '********' : null as any,
+    securityBypassToken: i.securityBypassToken ? '********' : null as any,
+  };
+}
+
+function decryptAccessToken(token: string | null | undefined): string | null {
+  return decryptIfNeeded(token) ?? token ?? null;
+}
 
 const createIntegrationSchema = z.object({
   projectId: z.string(),
@@ -66,7 +79,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return integrations;
+    return integrations.map(maskSensitive);
   });
 
   fastify.get('/api/gitlab-integrations/:projectId', async (request, reply) => {
@@ -85,7 +98,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'GitLab integration not found' });
     }
 
-    return integration;
+    return maskSensitive(integration);
   });
 
   fastify.post('/api/gitlab-integrations', async (request, reply) => {
@@ -100,7 +113,11 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const integration = await prisma.gitlabIntegration.create({
-      data: body,
+      data: {
+        ...body,
+        webhookToken: hashToken(body.webhookToken),
+        securityBypassToken: encryptIfNeeded(body.securityBypassToken),
+      },
       include: {
         project: { select: { id: true, name: true, productId: true } },
       },
@@ -120,7 +137,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return reply.status(201).send(integration);
+    return reply.status(201).send(maskSensitive(integration));
   });
 
   fastify.patch('/api/gitlab-integrations/:projectId', async (request, reply) => {
@@ -132,9 +149,13 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'GitLab integration not found' });
     }
 
+    const updateData: any = { ...body };
+    if (body.webhookToken !== undefined) updateData.webhookToken = hashToken(body.webhookToken);
+    if (body.securityBypassToken !== undefined) updateData.securityBypassToken = encryptIfNeeded(body.securityBypassToken);
+
     const updated = await prisma.gitlabIntegration.update({
       where: { projectId },
-      data: body,
+      data: updateData,
       include: {
         project: { select: { id: true, name: true, productId: true } },
       },
@@ -149,7 +170,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return updated;
+    return maskSensitive(updated);
   });
 
   fastify.delete('/api/gitlab-integrations/:projectId', async (request, reply) => {
@@ -188,9 +209,9 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
 
     const newToken = generateToken();
 
-    const updated = await prisma.gitlabIntegration.update({
+    await prisma.gitlabIntegration.update({
       where: { projectId },
-      data: { webhookToken: newToken },
+      data: { webhookToken: hashToken(newToken) },
     });
 
     await prisma.auditLog.create({
@@ -202,7 +223,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return { webhookToken: updated.webhookToken };
+    return { webhookToken: newToken };
   });
 
   fastify.post('/api/gitlab-integrations/:projectId/rotate-bypass-token', async (request, reply) => {
@@ -219,9 +240,9 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
 
     const newToken = generateToken();
 
-    const updated = await prisma.gitlabIntegration.update({
+    await prisma.gitlabIntegration.update({
       where: { projectId },
-      data: { securityBypassToken: newToken },
+      data: { securityBypassToken: encryptIfNeeded(newToken) },
     });
 
     await prisma.auditLog.create({
@@ -233,7 +254,7 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    return { securityBypassToken: updated.securityBypassToken };
+    return { securityBypassToken: newToken };
   });
 
   fastify.post('/api/gitlab-integrations/webhook', async (request, reply) => {
@@ -243,20 +264,37 @@ const gitlabIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(401).send({ error: 'Missing webhook token' });
     }
 
-    const integration = await prisma.gitlabIntegration.findFirst({
-      where: { webhookToken: token },
-      include: { project: true },
-    });
-
-    if (!integration) {
-      return reply.status(403).send({ error: 'Invalid webhook token' });
-    }
-
     let payload;
     try {
       payload = webhookPayloadSchema.parse(request.body);
     } catch {
       return reply.status(400).send({ error: 'Invalid webhook payload' });
+    }
+
+    const projectPath = payload.project?.path_with_namespace;
+    if (!projectPath) {
+      return reply.status(400).send({ error: 'Missing project path in payload' });
+    }
+
+    const integration = await prisma.gitlabIntegration.findFirst({
+      where: { projectPath },
+      include: { project: true },
+    });
+
+    if (!integration) {
+      return reply.status(404).send({ error: 'No matching integration' });
+    }
+
+    if (!integration.webhookToken) {
+      return reply.status(403).send({ error: 'Webhook not configured' });
+    }
+
+    const tokenValid = integration.webhookToken.includes(':')
+      ? verifyToken(token, integration.webhookToken)
+      : secureCompare(token, decryptIfNeeded(integration.webhookToken) ?? integration.webhookToken);
+
+    if (!tokenValid) {
+      return reply.status(403).send({ error: 'Invalid webhook token' });
     }
 
     await prisma.gitlabIntegration.update({
@@ -382,7 +420,7 @@ security_mobsf_audit:
     const integration = await prisma.gitlabGroupIntegration.create({
       data: {
         groupPath: body.groupPath,
-        accessToken: body.accessToken,
+        accessToken: encryptIfNeeded(body.accessToken),
         complianceFrameworkName: body.complianceFrameworkName,
         compliancePipelinePath: body.compliancePipelinePath,
         enforcementEnabled: body.enforcementEnabled,
@@ -421,9 +459,12 @@ security_mobsf_audit:
       return reply.status(404).send({ error: 'Group integration not found' });
     }
 
+    const updateData: any = { ...body };
+    if (body.accessToken !== undefined) updateData.accessToken = encryptIfNeeded(body.accessToken);
+
     const updated = await prisma.gitlabGroupIntegration.update({
       where: { id },
-      data: body,
+      data: updateData,
     });
 
     await prisma.auditLog.create({
@@ -475,7 +516,7 @@ security_mobsf_audit:
     }
 
     try {
-      const client = new GitlabGroupClient(integration.groupPath, integration.accessToken);
+      const client = new GitlabGroupClient(integration.groupPath, decryptAccessToken(integration.accessToken) ?? "");
       const group = await client.getGroup();
       return { success: true, groupId: group.id, groupName: group.name };
     } catch (error) {
@@ -497,7 +538,7 @@ security_mobsf_audit:
     }
 
     try {
-      const client = new GitlabGroupClient(integration.groupPath, integration.accessToken);
+      const client = new GitlabGroupClient(integration.groupPath, decryptAccessToken(integration.accessToken) ?? "");
       const frameworks = await client.listComplianceFrameworks();
       return { frameworks };
     } catch (error) {
@@ -531,7 +572,7 @@ security_mobsf_audit:
     try {
       const client = new GitlabGroupClient(
         integration.groupPath,
-        integration.accessToken,
+        decryptAccessToken(integration.accessToken) ?? "",
         body.gitlabUrl
       );
 
@@ -746,7 +787,7 @@ secpilot_gate_check:
     try {
       const client = new GitlabGroupClient(
         integration.groupPath,
-        integration.accessToken,
+        decryptAccessToken(integration.accessToken) ?? "",
         body.gitlabUrl
       );
 
@@ -799,7 +840,7 @@ secpilot_gate_check:
     }
 
     try {
-      const client = new GitlabGroupClient(integration.groupPath, integration.accessToken);
+      const client = new GitlabGroupClient(integration.groupPath, decryptAccessToken(integration.accessToken) ?? "");
       const projects = await client.listGroupProjects({
         page: query.page,
         perPage: query.perPage,

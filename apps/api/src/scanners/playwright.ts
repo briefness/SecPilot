@@ -3,6 +3,9 @@ import { config } from '../config.js';
 import { TrafficDye } from '@secops/traffic-dye';
 import { webcrypto as crypto } from 'node:crypto';
 
+declare const document: any;
+declare const window: any;
+
 interface PlaywrightLoginConfig {
   loginUrl: string;
   username: string;
@@ -54,6 +57,7 @@ export class PlaywrightScanner extends BaseScanner {
 
     let playwright: any;
     try {
+      // @ts-ignore - playwright is optional dependency
       const mod = await import('playwright');
       playwright = mod;
     } catch {
@@ -122,8 +126,8 @@ export class PlaywrightScanner extends BaseScanner {
 
           const links = await page.evaluate(() => {
             return Array.from(document.querySelectorAll('a[href]'))
-              .map(a => (a as HTMLAnchorElement).href)
-              .filter(href => href.startsWith(window.location.origin))
+              .map((a: any) => a.href)
+              .filter((href: string) => href.startsWith(window.location.origin))
               .slice(0, 10);
           });
 
@@ -164,7 +168,6 @@ export class PlaywrightScanner extends BaseScanner {
         success: true,
         findings,
         durationSeconds,
-        traceId,
         rawResponse: { pagesScanned: pageCount, uniqueUrls: visited.size, usedZap: useZapProxy, traceId },
       };
     } catch (error) {
@@ -222,10 +225,10 @@ export class PlaywrightScanner extends BaseScanner {
     }
   }
 
-  private async fuzzForms(page: any, dye: TrafficDye | null): Promise<void> {
+  private async fuzzForms(page: any, _dye: TrafficDye | null): Promise<void> {
     const inputs = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('input, textarea, select'))
-        .filter(el => el.type !== 'hidden' && el.type !== 'submit')
+        .filter((el: any) => el.type !== 'hidden' && el.type !== 'submit')
         .map((el: any) => ({ name: el.name, id: el.id, type: el.type }));
     });
 

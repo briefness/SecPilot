@@ -22,7 +22,7 @@ function mapStatus(ddFinding: any): FindingStatus {
   return FindingStatus.NEW;
 }
 
-async function pullFromDefectDojo(job: Job) {
+async function pullFromDefectDojo(_job: Job) {
   console.log('[DD Worker] Running DefectDojo pull sync...');
 
   const dd = getDefectDojoClient();
@@ -65,10 +65,13 @@ async function pullFromDefectDojo(job: Job) {
 async function syncFindingsFromDD(projectId: string, productId: number): Promise<{ new: number; updated: number }> {
   const dd = getDefectDojoClient();
 
-  const findings = await dd.listFindings(productId, {
-    active: 'true',
+  const findingsResp = await dd.listFindings({
+    product: productId,
+    active: true,
     limit: 500,
   });
+
+  const findings = findingsResp.results;
 
   let newCount = 0;
   let updatedCount = 0;
@@ -85,7 +88,11 @@ async function syncFindingsFromDD(projectId: string, productId: number): Promise
     const cve = ddFinding.cve || undefined;
     const cvss = ddFinding.cvssv3_score ? Number(ddFinding.cvssv3_score) : undefined;
 
-    const dedupHash = computeDedupHash(projectId, title, location || filePath || 'unknown', severity);
+    const dedupHash = computeDedupHash({
+      title,
+      location: location || filePath || 'unknown',
+      cwe,
+    });
     const scannerRef = ddFinding.id ? String(ddFinding.id) : undefined;
 
     const existing = await prisma.finding.findFirst({

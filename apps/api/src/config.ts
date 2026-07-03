@@ -1,6 +1,12 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+const emptyToUndefined = (v: unknown) => (v === '' ? undefined : v);
+
+const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
+
+const optionalString = z.preprocess(emptyToUndefined, z.string().optional());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
@@ -9,30 +15,27 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   JWT_EXPIRES_IN: z.string().default('24h'),
   SECOPS_SALT: z.string().min(16),
-  SECOPS_BYPASS_TOKEN: z.string().optional(),
+  SECOPS_BYPASS_TOKEN: optionalString,
   CORS_ORIGIN: z.string().default('*'),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW: z.coerce.number().default(60000),
-  DEFECTDOJO_URL: z.string().url().optional(),
-  DEFECTDOJO_API_KEY: z.string().optional(),
-  DEFECTDOJO_USERNAME: z.string().optional(),
-  DEFECTDOJO_PASSWORD: z.string().optional(),
-  SONARQUBE_URL: z.string().url().optional(),
-  SONARQUBE_TOKEN: z.string().optional(),
-  ZAP_API_URL: z.string().url().optional(),
-  ZAP_API_KEY: z.string().optional(),
-  MOBSF_URL: z.string().url().optional(),
-  MOBSF_API_KEY: z.string().optional(),
-  OSV_SCANNER_PATH: z.string().optional(),
-  NUCLEI_PATH: z.string().optional(),
-  PLAYWRIGHT_ENABLED: z.string().optional(),
-  ZAP_PROXY_URL: z.string().url().optional(),
-  TRAFFIC_DYE_ENABLED: z.string().optional(),
-  SLACK_WEBHOOK_URL: z.preprocess(
-    (v) => (v === '' ? undefined : v),
-    z.string().url().optional()
-  ),
-  PAGERDUTY_ROUTING_KEY: z.string().optional(),
+  DEFECTDOJO_URL: optionalUrl,
+  DEFECTDOJO_API_KEY: optionalString,
+  DEFECTDOJO_USERNAME: optionalString,
+  DEFECTDOJO_PASSWORD: optionalString,
+  SONARQUBE_URL: optionalUrl,
+  SONARQUBE_TOKEN: optionalString,
+  ZAP_API_URL: optionalUrl,
+  ZAP_API_KEY: optionalString,
+  MOBSF_URL: optionalUrl,
+  MOBSF_API_KEY: optionalString,
+  OSV_SCANNER_PATH: optionalString,
+  NUCLEI_PATH: optionalString,
+  PLAYWRIGHT_ENABLED: optionalString,
+  ZAP_PROXY_URL: optionalUrl,
+  TRAFFIC_DYE_ENABLED: optionalString,
+  SLACK_WEBHOOK_URL: optionalUrl,
+  PAGERDUTY_ROUTING_KEY: optionalString,
 });
 
 export type Config = z.infer<typeof envSchema>;

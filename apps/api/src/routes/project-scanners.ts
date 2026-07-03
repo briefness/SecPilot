@@ -109,6 +109,7 @@ const projectScannerRoutes: FastifyPluginAsync = async (fastify) => {
       branch: z.string().default('main'),
       commitHash: z.string().optional(),
       pipelineStage: z.nativeEnum(PipelineStage).optional(),
+      appFilePath: z.string().optional(),
     }).parse(request.body);
 
     const project = await prisma.project.findUnique({ where: { id } });
@@ -135,8 +136,7 @@ const projectScannerRoutes: FastifyPluginAsync = async (fastify) => {
       const target = body.targetUrl || undefined;
 
       if (scanType === ScanType.MOBILE_MOBSF) {
-        const hasAppFile = project.type?.includes('MOBILE') && 
-          (body as any).appFilePath;
+        const hasAppFile = project.type?.includes('MOBILE') && body.appFilePath;
         if (!hasAppFile) {
           skipped.push({ scanType, reason: '需要上传 APK/IPA 文件后才能进行移动端扫描' });
           continue;

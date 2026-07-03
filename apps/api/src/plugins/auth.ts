@@ -7,6 +7,7 @@ export interface JwtPayload {
   email?: string;
   role?: string;
   name?: string;
+  tokenVersion?: number;
   mfaPending?: boolean;
   mfaSetup?: boolean;
   mfaSecret?: string;
@@ -47,6 +48,10 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       return;
     }
 
+    if (request.url.endsWith('/webhook') && (request.url.includes('gitlab') || request.url.includes('github'))) {
+      return;
+    }
+
     try {
       const cookieHeader = request.headers.cookie || '';
       const tokenMatch = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/);
@@ -59,11 +64,15 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
       const decoded = fastify.jwt.verify<JwtPayload>(token);
       const user = await prisma.user.findUnique({
         where: { id: decoded.userId },
-        select: { id: true, email: true, role: true, name: true, mfaEnabled: true },
+        select: { id: true, email: true, role: true, name: true, mfaEnabled: true, tokenVersion: true },
       });
 
       if (!user) {
         return reply.status(401).send({ error: 'User not found' });
+      }
+
+      if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== user.tokenVersion) {
+        return reply.status(401).send({ error: 'Token revoked' });
       }
 
       request.user = {

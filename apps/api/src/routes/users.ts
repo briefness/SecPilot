@@ -170,6 +170,7 @@ const userRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.mfaEnabled !== undefined) updateData.mfaEnabled = body.mfaEnabled;
     if (body.password) {
       updateData.passwordHash = await hashPassword(body.password);
+      updateData.tokenVersion = { increment: 1 };
     }
 
     const updated = await prisma.user.update({

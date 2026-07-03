@@ -1,13 +1,10 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
 import { notificationService } from '../lib/notification.js';
 import { BypassSeverity, BypassStatus, UserRole } from '@prisma/client';
-
-function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
-}
+import { hashToken } from '../lib/encryption.js';
 
 function generateBypassToken(): string {
   return 'sbp_' + randomBytes(24).toString('hex');
@@ -114,32 +111,34 @@ const bypassRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'Expiry date must be in the future' });
     }
 
-    const bypass = await prisma.bypassRequest.create({
-      data: {
-        projectId: body.projectId,
-        reason: body.reason,
-        requestedBy: request.user.userId,
-        expiresAt: body.expiresAt,
-        status: BypassStatus.PENDING,
-      },
-    });
-
-    const auditLog = await prisma.auditLog.create({
-      data: {
-        action: 'bypass.request',
-        userId: request.user.userId,
-        projectId: body.projectId,
-        metadata: {
-          bypassId: bypass.id,
+    const bypass = await prisma.$transaction(async (tx) => {
+      const b = await tx.bypassRequest.create({
+        data: {
+          projectId: body.projectId,
           reason: body.reason,
+          requestedBy: request.user.userId,
           expiresAt: body.expiresAt,
+          status: BypassStatus.PENDING,
         },
-      },
-    });
+      });
 
-    await prisma.bypassRequest.update({
-      where: { id: bypass.id },
-      data: { auditLogId: auditLog.id },
+      const auditLog = await tx.auditLog.create({
+        data: {
+          action: 'bypass.request',
+          userId: request.user.userId,
+          projectId: body.projectId,
+          metadata: {
+            bypassId: b.id,
+            reason: body.reason,
+            expiresAt: body.expiresAt,
+          },
+        },
+      });
+
+      return tx.bypassRequest.update({
+        where: { id: b.id },
+        data: { auditLogId: auditLog.id },
+      });
     });
 
     return reply.status(201).send(bypass);
@@ -165,27 +164,46 @@ const bypassRoutes: FastifyPluginAsync = async (fastify) => {
 
     const bypassToken = body.status === BypassStatus.APPROVED ? generateBypassToken() : null;
 
-    const updated = await prisma.bypassRequest.update({
-      where: { id },
-      data: {
-        status: body.status,
-        approvedBy: request.user.userId,
-        approvedAt: new Date(),
-        tokenHash: bypassToken ? hashToken(bypassToken) : null,
-      },
-    });
+    let updated: typeof bypass | null = null;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const updateResult = await tx.bypassRequest.updateMany({
+          where: { id, status: BypassStatus.PENDING },
+          data: {
+            status: body.status,
+            approvedBy: request.user.userId,
+            approvedAt: new Date(),
+            tokenHash: bypassToken ? hashToken(bypassToken) : null,
+          },
+        });
 
-    await prisma.auditLog.create({
-      data: {
-        action: body.status === BypassStatus.APPROVED ? 'bypass.approve' : 'bypass.reject',
-        userId: request.user.userId,
-        projectId: bypass.projectId,
-        metadata: {
-          bypassId: id,
-          comment: body.comment,
-        },
-      },
-    });
+        if (updateResult.count === 0) {
+          const latest = await tx.bypassRequest.findUnique({ where: { id } });
+          throw Object.assign(new Error('Bypass status changed'), { statusCode: 409, currentStatus: latest?.status });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            action: body.status === BypassStatus.APPROVED ? 'bypass.approve' : 'bypass.reject',
+            userId: request.user.userId,
+            projectId: bypass.projectId,
+            metadata: {
+              bypassId: id,
+              comment: body.comment,
+            },
+          },
+        });
+
+        return tx.bypassRequest.findUnique({ where: { id } });
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 409) {
+        return reply.status(409).send({ error: 'Bypass status changed', currentStatus: err.currentStatus });
+      }
+      throw err;
+    }
+
+    if (!updated) return reply.status(404).send({ error: 'Bypass request not found' });
 
     if (body.status === BypassStatus.APPROVED) {
       notificationService.sendAll({
@@ -196,7 +214,7 @@ const bypassRoutes: FastifyPluginAsync = async (fastify) => {
           'Bypass ID': id,
           '严重程度': bypass.severity,
           '过期时间': new Date(bypass.expiresAt).toLocaleString(),
-          '审批人': request.user.name,
+          '审批人': request.user.name ?? 'System',
         },
       }).catch((err) => console.warn('[Bypass] Notification send failed:', err));
 

@@ -135,3 +135,8 @@ export async function getQueueStats() {
     defectDojo: { waiting: ddWaiting, active: ddActive, completed: ddCompleted, failed: ddFailed },
   };
 }
+
+export async function getRedisClient() {
+  const queue = getScanQueue();
+  return queue.client;
+}

@@ -56,7 +56,7 @@ export function createDyeMiddleware(options: DyeMiddlewareOptions) {
     return undefined;
   }
 
-  function expressMiddleware(req: any, res: any, next: Function) {
+  function expressMiddleware(req: any, res: any, next: (err?: any) => void) {
     const clientIp = req.ip || req.socket?.remoteAddress;
     const result = dye.verify(req.headers, clientIp);
 
@@ -93,7 +93,7 @@ export function createDyeMiddleware(options: DyeMiddlewareOptions) {
     next();
   }
 
-  function fastifyPlugin(fastify: any, opts: any, done: Function) {
+  function fastifyPlugin(fastify: any, _opts: any, done: (err?: any) => void) {
     fastify.addHook('onRequest', async (request: any, reply: any) => {
       const clientIp = request.ip || request.headers['x-forwarded-for'] || request.socket?.remoteAddress;
       const result = dye.verify(request.headers, clientIp);
@@ -136,25 +136,13 @@ export function createDyeMiddleware(options: DyeMiddlewareOptions) {
     dye,
     express: expressMiddleware,
     fastify: fastifyPlugin,
-    fastifyPlugin: (fastify: any, opts: any, done: Function) => fastifyPlugin(fastify, opts, done),
+    fastifyPlugin: (fastify: any, opts: any, done: (err?: any) => void) => fastifyPlugin(fastify, opts, done),
     getShadowRedisKey: (key: string) => dye.getShadowRedisKey(key),
     getShadowMqQueue: (queue: string) => dye.getShadowMqQueue(queue),
   };
 }
 
 export function createShadowRedis(redis: any, prefix: string = 'secops:') {
-  const originalGet = redis.get?.bind(redis);
-  const originalSet = redis.set?.bind(redis);
-  const originalDel = redis.del?.bind(redis);
-  const originalExists = redis.exists?.bind(redis);
-  const originalHGet = redis.hget?.bind(redis);
-  const originalHSet = redis.hset?.bind(redis);
-  const originalHDel = redis.hdel?.bind(redis);
-  const originalLPush = redis.lpush?.bind(redis);
-  const originalRPush = redis.rpush?.bind(redis);
-  const originalLPop = redis.lpop?.bind(redis);
-  const originalRPop = redis.rpop?.bind(redis);
-
   function shadowKey(key: string): string {
     if (key.startsWith(prefix)) return key;
     return `${prefix}${key}`;

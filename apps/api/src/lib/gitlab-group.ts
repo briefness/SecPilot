@@ -68,7 +68,7 @@ export class GitlabGroupClient {
   }
 
   async listComplianceFrameworks(): Promise<ComplianceFramework[]> {
-    const result = await request<ComplianceFrameworkList>(
+    const result = await this.request<ComplianceFrameworkList>(
       `/groups/${this.groupPath}/compliance_frameworks`,
       'GET',
       undefined

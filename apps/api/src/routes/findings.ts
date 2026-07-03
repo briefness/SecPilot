@@ -1,7 +1,7 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { computeDedupHash } from '../utils/dedup.js';
+import { computeDedupHash, dedupeLatest } from '../utils/dedup.js';
 import { Severity, FindingStatus, Prisma } from '@prisma/client';
 import { getDefectDojoClient, type DDFinding } from '../lib/defectdojo.js';
 
@@ -41,6 +41,20 @@ const batchUpdateSchema = z.object({
   status: z.nativeEnum(FindingStatus).optional(),
   assigneeId: z.string().nullable().optional(),
 });
+
+const VALID_STATUS_TRANSITIONS: Record<FindingStatus, FindingStatus[]> = {
+  [FindingStatus.NEW]: [FindingStatus.CONFIRMED, FindingStatus.FALSE_POSITIVE, FindingStatus.ACCEPTED_RISK],
+  [FindingStatus.CONFIRMED]: [FindingStatus.IN_PROGRESS, FindingStatus.FALSE_POSITIVE, FindingStatus.ACCEPTED_RISK],
+  [FindingStatus.IN_PROGRESS]: [FindingStatus.MITIGATED, FindingStatus.FALSE_POSITIVE, FindingStatus.ACCEPTED_RISK],
+  [FindingStatus.MITIGATED]: [FindingStatus.RESOLVED],
+  [FindingStatus.RESOLVED]: [],
+  [FindingStatus.FALSE_POSITIVE]: [FindingStatus.NEW],
+  [FindingStatus.ACCEPTED_RISK]: [FindingStatus.NEW],
+};
+
+function isValidTransition(from: FindingStatus, to: FindingStatus): boolean {
+  return VALID_STATUS_TRANSITIONS[from]?.includes(to) ?? false;
+}
 
 function mapDDFindingToLocal(f: DDFinding, project?: { id: string; name: string; productId: string }) {
   return {
@@ -94,17 +108,6 @@ function mapOrdering(sortBy: string, sortOrder: string): string {
   };
   const field = orderMap[sortBy] || 'created';
   return sortOrder === 'desc' ? `-${field}` : field;
-}
-
-function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
-  const latestMap = new Map<string, T>();
-  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  for (const f of sorted) {
-    if (!latestMap.has(f.dedupHash)) {
-      latestMap.set(f.dedupHash, f);
-    }
-  }
-  return Array.from(latestMap.values());
 }
 
 const findingsRoutes: FastifyPluginAsync = async (fastify) => {
@@ -198,7 +201,7 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
-    const deduped = dedupeFindingsLatest(allFindings);
+    const deduped = dedupeLatest(allFindings);
 
     const severityOrder: Record<string, number> = {
       [Severity.CRITICAL]: 0,
@@ -312,21 +315,25 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Finding not found' });
     }
 
-    const updated = await prisma.finding.update({
-      where: { id },
-      data: { falsePositive: body.falsePositive },
-    });
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.finding.update({
+        where: { id },
+        data: { falsePositive: body.falsePositive },
+      });
 
-    await prisma.auditLog.create({
-      data: {
-        action: body.falsePositive ? 'finding.mark_fp' : 'finding.unmark_fp',
-        userId: request.user.userId,
-        projectId: finding.projectId,
-        metadata: {
-          findingId: id,
-          reason: body.reason,
+      await tx.auditLog.create({
+        data: {
+          action: body.falsePositive ? 'finding.mark_fp' : 'finding.unmark_fp',
+          userId: request.user.userId,
+          projectId: finding.projectId,
+          metadata: {
+            findingId: id,
+            reason: body.reason,
+          },
         },
-      },
+      });
+
+      return result;
     });
 
     return updated;
@@ -450,7 +457,7 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       select: { id: true, dedupHash: true, createdAt: true, severity: true, cwe: true, filePath: true },
     });
 
-    const deduped = dedupeFindingsLatest(allFindings);
+    const deduped = dedupeLatest(allFindings);
 
     const severityDistribution: Record<string, number> = {
       [Severity.CRITICAL]: 0,
@@ -495,19 +502,30 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Finding not found' });
     }
 
+    if (finding.status !== body.status && !isValidTransition(finding.status, body.status)) {
+      return reply.status(400).send({
+        error: `Invalid status transition from ${finding.status} to ${body.status}`,
+        allowedTransitions: VALID_STATUS_TRANSITIONS[finding.status] || [],
+      });
+    }
+
     const data: Record<string, unknown> = { status: body.status };
     if (body.resolutionNote) data.resolutionNote = body.resolutionNote;
     if (body.status === FindingStatus.RESOLVED) data.resolvedAt = new Date();
 
-    const updated = await prisma.finding.update({ where: { id }, data });
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.finding.update({ where: { id }, data });
 
-    await prisma.auditLog.create({
-      data: {
-        action: 'finding.status_update',
-        userId: request.user.userId,
-        projectId: finding.projectId,
-        metadata: { findingId: id, fromStatus: finding.status, toStatus: body.status, note: body.resolutionNote },
-      },
+      await tx.auditLog.create({
+        data: {
+          action: 'finding.status_update',
+          userId: request.user.userId,
+          projectId: finding.projectId,
+          metadata: { findingId: id, fromStatus: finding.status, toStatus: body.status, note: body.resolutionNote },
+        },
+      });
+
+      return result;
     });
 
     return updated;
@@ -522,21 +540,25 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Finding not found' });
     }
 
-    const updated = await prisma.finding.update({
-      where: { id },
-      data: { assigneeId: body.assigneeId },
-      include: {
-        assignee: { select: { id: true, name: true, email: true } },
-      },
-    });
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.finding.update({
+        where: { id },
+        data: { assigneeId: body.assigneeId },
+        include: {
+          assignee: { select: { id: true, name: true, email: true } },
+        },
+      });
 
-    await prisma.auditLog.create({
-      data: {
-        action: 'finding.assign',
-        userId: request.user.userId,
-        projectId: finding.projectId,
-        metadata: { findingId: id, assigneeId: body.assigneeId },
-      },
+      await tx.auditLog.create({
+        data: {
+          action: 'finding.assign',
+          userId: request.user.userId,
+          projectId: finding.projectId,
+          metadata: { findingId: id, assigneeId: body.assigneeId },
+        },
+      });
+
+      return result;
     });
 
     return updated;
@@ -550,23 +572,27 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
     if (body.assigneeId !== undefined) data.assigneeId = body.assigneeId;
     if (body.status === FindingStatus.RESOLVED) data.resolvedAt = new Date();
 
-    const result = await prisma.finding.updateMany({
-      where: { id: { in: body.ids } },
-      data,
-    });
+    const result = await prisma.$transaction(async (tx) => {
+      const updateResult = await tx.finding.updateMany({
+        where: { id: { in: body.ids } },
+        data,
+      });
 
-    const sampleFinding = await prisma.finding.findFirst({
-      where: { id: { in: body.ids } },
-      select: { projectId: true },
-    });
+      const sampleFinding = await tx.finding.findFirst({
+        where: { id: { in: body.ids } },
+        select: { projectId: true },
+      });
 
-    await prisma.auditLog.create({
-      data: {
-        action: 'finding.batch_update',
-        userId: request.user.userId,
-        projectId: sampleFinding?.projectId,
-        metadata: { ids: body.ids, status: body.status, assigneeId: body.assigneeId, count: result.count },
-      },
+      await tx.auditLog.create({
+        data: {
+          action: 'finding.batch_update',
+          userId: request.user.userId,
+          projectId: sampleFinding?.projectId,
+          metadata: { ids: body.ids, status: body.status, assigneeId: body.assigneeId, count: updateResult.count },
+        },
+      });
+
+      return updateResult;
     });
 
     return { updated: result.count };
@@ -602,7 +628,7 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       select: { id: true, dedupHash: true, createdAt: true, status: true },
     });
 
-    const deduped = dedupeFindingsLatest(allFindings);
+    const deduped = dedupeLatest(allFindings);
 
     const result: Record<string, number> = {};
     for (const s of Object.values(FindingStatus)) {
@@ -631,7 +657,7 @@ const findingsRoutes: FastifyPluginAsync = async (fastify) => {
       select: { id: true, dedupHash: true, createdAt: true, slaDeadline: true },
     });
 
-    const deduped = dedupeFindingsLatest(allFindings);
+    const deduped = dedupeLatest(allFindings);
 
     const now = new Date();
     const threeDaysLater = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);

@@ -330,7 +330,7 @@ class DefectDojoClient {
     const query: Record<string, unknown> = {};
     if (params.product) query.product = params.product;
     if (params.engagement) query.engagement = params.engagement;
-    if (params.test) params.test = params.test;
+    if (params.test) query.test = params.test;
     if (params.severity) query.severity = params.severity;
     if (params.cwe) query.cwe = params.cwe;
     if (params.cve) query.cve = params.cve;
@@ -467,28 +467,6 @@ class DefectDojoClient {
       target_start: today,
       target_end: endDate,
     });
-  }
-
-  async listFindings(
-    productId: number,
-    params?: {
-      active?: string;
-      verified?: string;
-      severity?: string;
-      limit?: number;
-      offset?: number;
-    }
-  ): Promise<DDFinding[]> {
-    const result = await this.request<PaginatedResponse<DDFinding>>(
-      'GET',
-      '/findings/',
-      undefined,
-      {
-        product: productId,
-        ...params,
-      }
-    );
-    return result.results;
   }
 }
 

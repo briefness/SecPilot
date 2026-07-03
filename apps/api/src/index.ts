@@ -44,7 +44,7 @@ async function buildServer() {
 
   await fastify.register(cors, {
     origin: config.CORS_ORIGIN === '*' ? true : config.CORS_ORIGIN.split(','),
-    credentials: true,
+    credentials: config.CORS_ORIGIN !== '*',
   });
 
   await fastify.register(jwt, {
@@ -138,6 +138,22 @@ async function startServer() {
     console.log(`🚀 SecOps API server running on port ${config.PORT}`);
     console.log(`📍 Environment: ${config.NODE_ENV}`);
     console.log(`🔍 Health check: http://localhost:${config.PORT}/api/health`);
+
+    const shutdown = async (signal: string) => {
+      console.log(`\nReceived ${signal}, shutting down gracefully...`);
+      try {
+        await fastify.close();
+        await prisma.$disconnect();
+        console.log('Server shutdown complete');
+        process.exit(0);
+      } catch (err) {
+        console.error('Error during shutdown:', err);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);

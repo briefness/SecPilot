@@ -196,6 +196,7 @@ async function processScanJob(job: Job<ScanJobData>) {
     if (findingsData.length > 0) {
       await prisma.finding.createMany({
         data: findingsData,
+        skipDuplicates: true,
       });
     }
 
@@ -301,8 +302,36 @@ async function processScanJob(job: Job<ScanJobData>) {
   }
 }
 
+async function cleanupStuckTasks() {
+  try {
+    const stuckTasks = await prisma.scanTask.findMany({
+      where: {
+        status: { in: [ScanStatus.RUNNING, ScanStatus.PENDING] },
+        createdAt: { lt: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+      },
+      select: { id: true, status: true },
+    });
+
+    if (stuckTasks.length > 0) {
+      await prisma.scanTask.updateMany({
+        where: { id: { in: stuckTasks.map(t => t.id) } },
+        data: {
+          status: ScanStatus.FAILED,
+          completedAt: new Date(),
+          errorMessage: 'Worker restarted - task was in progress and got interrupted',
+        },
+      });
+      console.log(`[Scan Worker] Cleaned up ${stuckTasks.length} stuck tasks`);
+    }
+  } catch (err) {
+    console.warn('[Scan Worker] Failed to clean up stuck tasks:', err);
+  }
+}
+
 function startWorker() {
   console.log('[Scan Worker] Starting scan worker...');
+
+  cleanupStuckTasks();
 
   const worker = new Worker<ScanJobData>('scan-queue', processScanJob, {
     connection: {

@@ -97,45 +97,78 @@ const scansRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
+    const existingActive = await prisma.scanTask.findFirst({
+      where: {
+        projectId: body.projectId,
+        type: body.type,
+        status: { in: [ScanStatus.PENDING, ScanStatus.RUNNING] },
+      },
+      select: { id: true, status: true },
+    });
+
+    if (existingActive) {
+      return reply.status(409).send({
+        error: 'Scan already in progress',
+        existingScanId: existingActive.id,
+        existingStatus: existingActive.status,
+      });
+    }
+
     const traceId = randomUUID();
 
-    const scanTask = await prisma.scanTask.create({
-      data: {
-        type: body.type,
-        status: ScanStatus.PENDING,
+    const scanTask = await prisma.$transaction(async (tx) => {
+      const task = await tx.scanTask.create({
+        data: {
+          type: body.type,
+          status: ScanStatus.PENDING,
+          projectId: body.projectId,
+          pipelineStage: body.pipelineStage,
+          targetUrl: body.targetUrl,
+          branch: body.branch,
+          commitHash: body.commitHash,
+          triggeredBy: request.user.userId,
+          traceId,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          action: 'scan.trigger',
+          userId: request.user.userId,
+          projectId: body.projectId,
+          metadata: {
+            scanId: task.id,
+            scanType: body.type,
+            traceId,
+          },
+        },
+      });
+
+      return task;
+    });
+
+    try {
+      await addScanJob({
+        scanTaskId: scanTask.id,
         projectId: body.projectId,
-        pipelineStage: body.pipelineStage,
+        scanType: body.type,
         targetUrl: body.targetUrl,
         branch: body.branch,
         commitHash: body.commitHash,
         triggeredBy: request.user.userId,
         traceId,
-      },
-    });
-
-    await addScanJob({
-      scanTaskId: scanTask.id,
-      projectId: body.projectId,
-      scanType: body.type,
-      targetUrl: body.targetUrl,
-      branch: body.branch,
-      commitHash: body.commitHash,
-      triggeredBy: request.user.userId,
-      traceId,
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        action: 'scan.trigger',
-        userId: request.user.userId,
-        projectId: body.projectId,
-        metadata: {
-          scanId: scanTask.id,
-          scanType: body.type,
-          traceId,
+      });
+    } catch (queueError) {
+      await prisma.scanTask.update({
+        where: { id: scanTask.id },
+        data: {
+          status: ScanStatus.FAILED,
+          errorMessage: `Failed to queue scan: ${queueError instanceof Error ? queueError.message : 'Unknown error'}`,
+          completedAt: new Date(),
         },
-      },
-    });
+      });
+      return reply.status(500).send({ error: 'Failed to queue scan task' });
+    }
 
     return reply.status(201).send(scanTask);
   });
@@ -181,13 +214,26 @@ const scansRoutes: FastifyPluginAsync = async (fastify) => {
 
     const queueCancelled = await cancelScanJob(id);
 
-    const updated = await prisma.scanTask.update({
-      where: { id },
+    const updateResult = await prisma.scanTask.updateMany({
+      where: {
+        id,
+        status: { in: [ScanStatus.PENDING, ScanStatus.RUNNING] },
+      },
       data: {
         status: ScanStatus.CANCELLED,
         completedAt: new Date(),
       },
     });
+
+    if (updateResult.count === 0) {
+      const latest = await prisma.scanTask.findUnique({ where: { id } });
+      return reply.status(409).send({
+        error: 'Scan status changed, cannot cancel',
+        currentStatus: latest?.status,
+      });
+    }
+
+    const updated = await prisma.scanTask.findUnique({ where: { id } });
 
     await prisma.auditLog.create({
       data: {

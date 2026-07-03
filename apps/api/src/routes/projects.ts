@@ -3,17 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { ProjectType, ProjectStatus, Severity, ScanType } from '@prisma/client';
 import { getDefectDojoClient } from '../lib/defectdojo.js';
-
-function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
-  const latestMap = new Map<string, T>();
-  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  for (const f of sorted) {
-    if (!latestMap.has(f.dedupHash)) {
-      latestMap.set(f.dedupHash, f);
-    }
-  }
-  return Array.from(latestMap.values());
-}
+import { dedupeLatest, countBySeverity, groupByProject, SeverityCounts } from '../utils/dedup.js';
 
 const DEFAULT_SCANNER_CONFIGS = [
   { type: ScanType.STATIC_SAST, enabled: true },
@@ -115,38 +105,51 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       prisma.project.count({ where }),
     ]);
 
-    const projectsWithStats = await Promise.all(
-      projects.map(async (project) => {
-        let findingSummary: Record<Severity, number>;
+    const projectIds = projects.map(p => p.id);
+    const ddProjects = projects.filter(p => dd.enabled && p.defectdojoProductId);
+    const localProjectIds = projectIds.filter(id => !dd.enabled || !projects.find(p => p.id === id)?.defectdojoProductId);
 
-        if (dd.enabled && project.defectdojoProductId) {
-          findingSummary = await getFindingSummaryFromDD(project.defectdojoProductId);
-        } else {
-          const allFindings = await prisma.finding.findMany({
-            where: { projectId: project.id, falsePositive: false },
-            select: { id: true, dedupHash: true, createdAt: true, severity: true },
-          });
-          const deduped = dedupeFindingsLatest(allFindings);
+    const [allLocalFindings, ddSummaries] = await Promise.all([
+      localProjectIds.length > 0
+        ? prisma.finding.findMany({
+            where: { projectId: { in: localProjectIds }, falsePositive: false },
+            select: { id: true, dedupHash: true, createdAt: true, severity: true, projectId: true },
+          })
+        : Promise.resolve([] as Array<{ id: string; dedupHash: string; createdAt: Date; severity: Severity; projectId: string }>),
+      Promise.all(
+        ddProjects.map(p =>
+          getFindingSummaryFromDD(p.defectdojoProductId!).then(summary => ({ projectId: p.id, summary }))
+        )
+      ),
+    ]);
 
-          findingSummary = {
-            [Severity.CRITICAL]: 0,
-            [Severity.HIGH]: 0,
-            [Severity.MEDIUM]: 0,
-            [Severity.LOW]: 0,
-            [Severity.INFO]: 0,
-          };
+    const localFindingsByProject = groupByProject(allLocalFindings);
+    const ddSummaryMap = new Map(ddSummaries.map(s => [s.projectId, s.summary]));
 
-          for (const item of deduped) {
-            findingSummary[item.severity]++;
-          }
-        }
+    const defaultSummary: SeverityCounts = {
+      CRITICAL: 0,
+      HIGH: 0,
+      MEDIUM: 0,
+      LOW: 0,
+      INFO: 0,
+    };
 
-        return {
-          ...project,
-          findingSummary,
-        };
-      })
-    );
+    const projectsWithStats = projects.map((project) => {
+      let findingSummary: Record<Severity, number>;
+
+      if (dd.enabled && project.defectdojoProductId) {
+        findingSummary = ddSummaryMap.get(project.id) ?? { ...defaultSummary };
+      } else {
+        const projectFindings = localFindingsByProject.get(project.id) ?? [];
+        const deduped = dedupeLatest(projectFindings);
+        findingSummary = countBySeverity(deduped, false) as Record<Severity, number>;
+      }
+
+      return {
+        ...project,
+        findingSummary,
+      };
+    });
 
     return {
       data: projectsWithStats,
@@ -188,7 +191,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         where: { projectId: id, falsePositive: false },
         select: { id: true, dedupHash: true, createdAt: true, severity: true },
       });
-      const deduped = dedupeFindingsLatest(allFindings);
+      const deduped = dedupeLatest(allFindings);
 
       findingSummary = {
         [Severity.CRITICAL]: 0,
@@ -356,7 +359,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
           { createdAt: 'desc' },
         ],
       });
-      const deduped = dedupeFindingsLatest(allFindings);
+      const deduped = dedupeLatest(allFindings);
 
       findingSummary = {
         [Severity.CRITICAL]: 0,
@@ -371,7 +374,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         totalFindings++;
       }
 
-      localTopFindings = deduped.slice(0, 10);
+      localTopFindings = deduped.slice(0, 10) as typeof localTopFindings;
     }
 
     const [totalScans, last30DaysScans, ddTopFindings] = await Promise.all([

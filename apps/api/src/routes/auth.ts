@@ -3,27 +3,24 @@ import { z } from 'zod';
 import { compare } from 'bcrypt';
 import { prisma } from '../lib/prisma.js';
 import { generateTOTPSecret, verifyTOTP, generateOTPAuthURL, qrCodeDataURL } from '../lib/totp.js';
+import { encryptIfNeeded, decryptIfNeeded } from '../lib/encryption.js';
 import { config } from '../config.js';
+import { getRedisClient } from '../lib/queue.js';
 
 const LOGIN_RATE_LIMIT = 10;
-const LOGIN_RATE_WINDOW_MS = 60 * 1000;
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOGIN_RATE_WINDOW_SEC = 60;
+const LOGIN_RATE_KEY_PREFIX = 'secops:login:rate:';
 
-function checkLoginRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = loginAttempts.get(ip);
+async function checkLoginRateLimit(ip: string): Promise<boolean> {
+  const redis = (await getRedisClient()) as any;
+  const key = `${LOGIN_RATE_KEY_PREFIX}${ip}`;
 
-  if (!entry || now > entry.resetAt) {
-    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_RATE_WINDOW_MS });
-    return true;
+  const count = await redis.incr(key);
+  if (count === 1) {
+    await redis.expire(key, LOGIN_RATE_WINDOW_SEC);
   }
 
-  if (entry.count >= LOGIN_RATE_LIMIT) {
-    return false;
-  }
-
-  entry.count++;
-  return true;
+  return count <= LOGIN_RATE_LIMIT;
 }
 
 const loginSchema = z.object({
@@ -64,7 +61,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   }
 
   fastify.post('/api/auth/login', async (request, reply) => {
-    if (!checkLoginRateLimit(request.ip)) {
+    if (!(await checkLoginRateLimit(request.ip))) {
       return reply.status(429).send({ error: 'Too many login attempts. Please try again later.' });
     }
 
@@ -112,6 +109,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         email: user.email,
         role: user.role,
         name: user.name,
+        tokenVersion: user.tokenVersion,
       },
       { expiresIn: '24h' }
     );
@@ -162,7 +160,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'MFA not enabled' });
     }
 
-    if (!verifyTOTP(body.code, user.mfaSecret)) {
+    if (!verifyTOTP(body.code, decryptIfNeeded(user.mfaSecret)!)) {
       await prisma.auditLog.create({
         data: {
           action: 'user.login_mfa_failed',
@@ -179,6 +177,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         email: user.email,
         role: user.role,
         name: user.name,
+        tokenVersion: user.tokenVersion,
       },
       { expiresIn: '24h' }
     );
@@ -280,7 +279,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       where: { id: user.id },
       data: {
         mfaEnabled: true,
-        mfaSecret: decoded.mfaSecret,
+        mfaSecret: encryptIfNeeded(decoded.mfaSecret),
       },
     });
 
@@ -315,7 +314,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(401).send({ error: 'Invalid password' });
     }
 
-    if (!verifyTOTP(body.code, user.mfaSecret)) {
+    if (!verifyTOTP(body.code, decryptIfNeeded(user.mfaSecret)!)) {
       return reply.status(400).send({ error: 'Invalid MFA code' });
     }
 
@@ -324,6 +323,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       data: {
         mfaEnabled: false,
         mfaSecret: null,
+        tokenVersion: { increment: 1 },
       },
     });
 

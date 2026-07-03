@@ -149,15 +149,16 @@ model ProjectScannerConfig {
 }
 
 model User {
-  id          String   @id @default(cuid())
-  email       String   @unique
-  name        String
-  role        UserRole @default(DEVELOPER)
-  mfaEnabled  Boolean  @default(false)
-  mfaSecret   String?
-  passwordHash String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  role          UserRole @default(DEVELOPER)
+  mfaEnabled    Boolean  @default(false)
+  mfaSecret     String?
+  passwordHash  String
+  tokenVersion  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   auditLogs    AuditLog[]
   bypassRequestsRequested BypassRequest[] @relation("bypass_requester")
@@ -253,7 +254,7 @@ model Finding {
   updatedAt      DateTime      @default(now())
 
   @@index([projectId, severity])
-  @@index([projectId, dedupHash])
+  @@unique([projectId, dedupHash])
   @@index([scanId])
   @@index([status])
   @@index([assigneeId])

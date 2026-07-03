@@ -1,20 +1,13 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
+import { hash } from 'bcrypt';
 import { prisma } from '../lib/prisma.js';
-import { Severity, ScanStatus, ScanType, FindingStatus, ApiKeyScope } from '@prisma/client';
-import { computeDedupHash } from '../utils/dedup.js';
+import { Severity, ScanStatus, ScanType, FindingStatus, ApiKeyScope, BypassStatus } from '@prisma/client';
+import { computeDedupHash, dedupeLatest } from '../utils/dedup.js';
+import { verifyToken } from '../lib/encryption.js';
 
-function dedupeFindingsLatest<T extends { id: string; dedupHash: string; createdAt: Date }>(findings: T[]): T[] {
-  const latestMap = new Map<string, T>();
-  const sorted = [...findings].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  for (const f of sorted) {
-    if (!latestMap.has(f.dedupHash)) {
-      latestMap.set(f.dedupHash, f);
-    }
-  }
-  return Array.from(latestMap.values());
-}
+const BCRYPT_ROUNDS = 12;
 
 const findingSchema = z.object({
   title: z.string().min(1),
@@ -74,12 +67,14 @@ async function getSystemUserId(): Promise<string> {
   });
 
   if (!systemUser) {
+    const randomPassword = Math.random().toString(36) + Math.random().toString(36);
+    const passwordHash = await hash(randomPassword, BCRYPT_ROUNDS);
     systemUser = await prisma.user.create({
       data: {
         email: 'system@secops.local',
         name: 'System Bot',
         role: 'ADMIN',
-        passwordHash: createHash('sha256').update(Math.random().toString(36)).digest('hex'),
+        passwordHash,
       },
       select: { id: true },
     });
@@ -176,48 +171,58 @@ const scannerIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       },
     });
 
+    const findingsData = body.findings.map((f) => {
+      const dedupHash = computeDedupHash({
+        cwe: f.cwe ?? undefined,
+        filePath: f.filePath ?? undefined,
+        lineStart: f.lineStart ?? undefined,
+        location: f.location ?? undefined,
+        title: f.title,
+      });
+      return {
+        title: f.title,
+        severity: f.severity,
+        cwe: f.cwe ?? undefined,
+        cve: f.cve ?? undefined,
+        cvss: f.cvss ?? undefined,
+        description: f.description,
+        location: f.location ?? undefined,
+        filePath: f.filePath ?? undefined,
+        lineStart: f.lineStart ?? undefined,
+        lineEnd: f.lineEnd ?? undefined,
+        scanId: scanTask.id,
+        projectId: body.projectId,
+        dedupHash,
+        falsePositive: f.falsePositive,
+        status: f.falsePositive ? FindingStatus.FALSE_POSITIVE : FindingStatus.NEW,
+      };
+    });
+
     let created = 0;
     let duplicates = 0;
 
-    for (const f of body.findings) {
-      const dedupHash = computeDedupHash({
-        cwe: f.cwe,
-        filePath: f.filePath,
-        lineStart: f.lineStart,
-        location: f.location,
-        title: f.title,
-      });
+    if (findingsData.length > 0) {
+      const existingHashes = new Set(
+        (await prisma.finding.findMany({
+          where: {
+            projectId: body.projectId,
+            dedupHash: { in: findingsData.map(f => f.dedupHash) },
+            falsePositive: false,
+          },
+          select: { dedupHash: true },
+        })).map(f => f.dedupHash)
+      );
 
-      const existing = await prisma.finding.findFirst({
-        where: { projectId: body.projectId, dedupHash, falsePositive: false },
-        select: { id: true },
-      });
+      const newFindings = findingsData.filter(f => !existingHashes.has(f.dedupHash));
+      duplicates = findingsData.length - newFindings.length;
 
-      if (existing) {
-        duplicates++;
-        continue;
+      if (newFindings.length > 0) {
+        await prisma.finding.createMany({
+          data: newFindings,
+          skipDuplicates: true,
+        });
+        created = newFindings.length;
       }
-
-      await prisma.finding.create({
-        data: {
-          title: f.title,
-          severity: f.severity,
-          cwe: f.cwe,
-          cve: f.cve,
-          cvss: f.cvss,
-          description: f.description,
-          location: f.location,
-          filePath: f.filePath,
-          lineStart: f.lineStart,
-          lineEnd: f.lineEnd,
-          scanId: scanTask.id,
-          projectId: body.projectId,
-          dedupHash,
-          falsePositive: f.falsePositive,
-          status: f.falsePositive ? FindingStatus.FALSE_POSITIVE : FindingStatus.NEW,
-        },
-      });
-      created++;
     }
 
     await prisma.project.update({
@@ -295,7 +300,7 @@ const scannerIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       orderBy: { severity: 'desc' },
     });
 
-    const findings = dedupeFindingsLatest(allFindings);
+    const findings = dedupeLatest(allFindings);
 
     const blockingFindings = findings.filter(
       (f) => severityOrder[f.severity] >= minLevel
@@ -471,20 +476,20 @@ const scannerIntegrationRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(403).send({ error: 'API key not authorized for this project' });
     }
 
-    const crypto = await import('node:crypto');
-    const tokenHash = crypto.createHash('sha256').update(body.token).digest('hex');
-
-    const bypass = await prisma.bypassRequest.findUnique({
-      where: { tokenHash },
+    const candidates = await prisma.bypassRequest.findMany({
+      where: {
+        projectId: body.projectId,
+        status: BypassStatus.APPROVED,
+        tokenHash: { not: null },
+        expiresAt: { gt: new Date() },
+      },
       include: { project: { select: { id: true, name: true } } },
     });
 
+    const bypass = candidates.find((b) => b.tokenHash && verifyToken(body.token, b.tokenHash));
+
     if (!bypass) {
       return { valid: false, reason: 'invalid_token' };
-    }
-
-    if (bypass.projectId !== body.projectId) {
-      return { valid: false, reason: 'project_mismatch' };
     }
 
     if (bypass.status !== 'APPROVED') {

@@ -24,7 +24,7 @@ import GitlabIntegration from '@/pages/GitlabIntegration'
 import GithubIntegration from '@/pages/GithubIntegration'
 import ApiKeys from '@/pages/ApiKeys'
 import Integration from '@/pages/Integration'
-import { isAuthenticated, setUser, clearAuth } from '@/lib/auth'
+import { isAuthenticated, initAuth, setUser, clearAuth } from '@/lib/auth'
 import api from '@/lib/api'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -32,21 +32,10 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     async function verify() {
-      if (!isAuthenticated()) {
-        setAuth(false)
-        return
-      }
-
-      try {
-        const res = await api.get('/auth/me') as any
-        if (res?.user) {
-          setUser(res.user)
-          setAuth(true)
-        } else {
-          clearAuth()
-          setAuth(false)
-        }
-      } catch {
+      const user = await initAuth()
+      if (user) {
+        setAuth(true)
+      } else {
         clearAuth()
         setAuth(false)
       }
